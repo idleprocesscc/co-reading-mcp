@@ -2,7 +2,7 @@
 
 A local MCP server that gives Claude a durable reading room:
 
-- import EPUB or plain text into stable chunks
+- import EPUB or plain text into stable chunks while preserving EPUB spine/chapter boundaries
 - list books and chunks
 - read chunk-by-chunk with `prevId` / `nextId`
 - search across a book
@@ -64,6 +64,8 @@ data/books/<book-id>/
     ch00.txt
     ch01.txt
 ```
+
+EPUB imports keep each spine item as a section boundary. If a chapter is longer than `--max-chars`, only that chapter is split into `Chapter Title Part 1/N`, `Part 2/N`, and so on.
 
 Runtime state is stored outside book content:
 

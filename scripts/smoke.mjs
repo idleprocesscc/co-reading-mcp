@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,67 @@ import { fileURLToPath } from "node:url";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const tempDataDir = await mkdtemp(path.join(os.tmpdir(), "co-reading-mcp-"));
 await cp(path.join(root, "data.example"), tempDataDir, { recursive: true });
+const tempEpub = path.join(tempDataDir, "spine-demo.epub");
+execFileSync(
+  "python3",
+  ["-", tempEpub],
+  {
+    input: `
+import sys, zipfile
+epub = sys.argv[1]
+with zipfile.ZipFile(epub, "w") as zf:
+    zf.writestr("mimetype", "application/epub+zip")
+    zf.writestr("META-INF/container.xml", """<?xml version='1.0'?>
+<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'>
+  <rootfiles><rootfile full-path='OPS/content.opf' media-type='application/oebps-package+xml'/></rootfiles>
+</container>""")
+    zf.writestr("OPS/content.opf", """<?xml version='1.0'?>
+<package xmlns='http://www.idpf.org/2007/opf' version='3.0'>
+  <metadata xmlns:dc='http://purl.org/dc/elements/1.1/'><dc:title>Spine Demo</dc:title><dc:creator>Smoke Test</dc:creator></metadata>
+  <manifest>
+    <item id='nav' href='nav.xhtml' media-type='application/xhtml+xml' properties='nav'/>
+    <item id='c1' href='chapter1.xhtml' media-type='application/xhtml+xml'/>
+    <item id='c2' href='chapter2.xhtml' media-type='application/xhtml+xml'/>
+  </manifest>
+  <spine><itemref idref='c1'/><itemref idref='c2'/></spine>
+</package>""")
+    zf.writestr("OPS/nav.xhtml", """<html xmlns='http://www.w3.org/1999/xhtml'><body><nav><ol>
+      <li><a href='chapter1.xhtml'>Chapter One</a></li>
+      <li><a href='chapter2.xhtml'>Chapter Two</a></li>
+    </ol></nav></body></html>""")
+    zf.writestr("OPS/chapter1.xhtml", """<html xmlns='http://www.w3.org/1999/xhtml'><body><h1>Fallback One</h1>
+      <p>First chapter paragraph with enough text to require a split when the max chars value is intentionally tiny.</p>
+      <p>Another paragraph that should remain under Chapter One rather than the whole book title.</p>
+    </body></html>""")
+    zf.writestr("OPS/chapter2.xhtml", """<html xmlns='http://www.w3.org/1999/xhtml'><body><h1>Fallback Two</h1>
+      <p>Second chapter text should keep its own spine boundary and chapter title.</p>
+    </body></html>""")
+`,
+    encoding: "utf8",
+  },
+);
+execFileSync("python3", [
+  path.join(root, "scripts/import_epub.py"),
+  tempEpub,
+  "--out",
+  path.join(tempDataDir, "books"),
+  "--book-id",
+  "spine-demo",
+  "--max-chars",
+  "90",
+]);
+const importedManifest = JSON.parse(
+  await readFile(path.join(tempDataDir, "books", "spine-demo", "manifest.json"), "utf8"),
+);
+if (!importedManifest.chunks.some((chunk) => chunk.sectionTitle === "Chapter One")) {
+  throw new Error("EPUB import did not preserve first spine section title");
+}
+if (!importedManifest.chunks.some((chunk) => chunk.sectionTitle === "Chapter Two")) {
+  throw new Error("EPUB import did not preserve second spine section title");
+}
+if (importedManifest.chunks.some((chunk) => chunk.title.startsWith("Spine Demo Part"))) {
+  throw new Error("EPUB import used whole-book Part titles instead of section titles");
+}
 await mkdir(path.join(tempDataDir, "books", "bad-book"), { recursive: true });
 await writeFile(
   path.join(tempDataDir, "books", "bad-book", "manifest.json"),

@@ -6,7 +6,9 @@
   "author": "Koshi, Claude, and GPT",
   "files": [
     "src",
-    "scripts",
+    "scripts/import_epub.py",
+    "scripts/import_text.py",
+    "scripts/smoke.mjs",
     "docs",
     "data.example",
     "README.md",

@@ -12,7 +12,12 @@ Each imported book lives under `data/books/<book-id>/manifest.json`.
   "chunks": [
     {
       "id": "ch00",
-      "title": "A Small Lamp",
+      "title": "A Small Lamp Part 1/2",
+      "sectionTitle": "A Small Lamp",
+      "sectionIndex": 0,
+      "sectionPart": 1,
+      "sectionPartCount": 2,
+      "sourcePath": "OPS/chapter01.xhtml",
       "order": 0,
       "path": "chunks/ch00.txt",
       "charCount": 331,
