@@ -363,6 +363,10 @@ const openedCard = await request("tools/call", {
   name: "reading_open_card",
   arguments: { cardId: contentJson(collectedCard).id },
 });
+const savedCard = await request("tools/call", {
+  name: "reading_save_card",
+  arguments: { cardId: contentJson(collectedCard).id },
+});
 const dismissedCard = await request("tools/call", {
   name: "reading_dismiss_card",
   arguments: { cardId: contentJson(collectedCard).id },
@@ -710,6 +714,9 @@ if (
   !["image/png", "image/svg+xml"].includes(openedCard.result.content[1].mimeType)
 ) {
   throw new Error("reading_open_card did not return a card image");
+}
+if (!contentJson(savedCard).path || !["image/png", "image/svg+xml"].includes(contentJson(savedCard).mimeType)) {
+  throw new Error("reading_save_card did not write a card image file");
 }
 if (contentJson(dismissedCard).status !== "dismissed" || contentJson(dismissedInbox).some((card) => card.id === contentJson(collectedCard).id)) {
   throw new Error("reading_dismiss_card did not clear the inbox item");

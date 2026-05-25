@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import readline from "node:readline";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   annotatePassage,
@@ -30,7 +31,7 @@ import {
   finishImport,
   importBook,
 } from "./importer.js";
-import { renderCardImageContent } from "./card-renderer.js";
+import { renderCardImageContent, saveCardImage } from "./card-renderer.js";
 
 const protocolVersion = "2024-11-05";
 
@@ -330,6 +331,17 @@ export const tools = [
     annotations: { title: "Open Reading Card", readOnlyHint: true },
   },
   {
+    name: "reading_save_card",
+    description: "Render one collected reading card to a local image file and return its absolute path.",
+    inputSchema: {
+      type: "object",
+      required: ["cardId"],
+      properties: { cardId: { type: "string" } },
+      additionalProperties: false,
+    },
+    annotations: { title: "Save Reading Card" },
+  },
+  {
     name: "reading_dismiss_card",
     description: "Dismiss one collected reading card from the card inbox without deleting it.",
     inputSchema: {
@@ -466,6 +478,15 @@ export async function callTool(name, args = {}) {
         image: renderCardImageContent(card),
       });
     }
+    case "reading_save_card": {
+      const card = await readCard(args.cardId);
+      const saved = saveCardImage(card, path.join(dataDir, "card-exports"));
+      return textContent({
+        cardId: card.id,
+        ...saved,
+        hint: "Attach or send this local file path from the host environment when your client supports file sending.",
+      });
+    }
     case "reading_dismiss_card":
       return textContent(await dismissCard(args.cardId));
     case "reading_list_cards":
@@ -491,7 +512,7 @@ export async function handle(message) {
         `Use this server as a shared co-reading surface. ` +
         `Claude can import EPUB/TXT uploads, continue reading, read chunked books, search passages, track progress, leave margin annotations, ` +
         `reply under user notes, and call reading_submit_user_notes when the human sends staged notes. ` +
-        `Reading actions may return cardNotification when a bookmark card is waiting; open it with reading_open_card or clear it with reading_dismiss_card. Use reading_card_collection to browse cards by pages without loading every image. ` +
+        `Reading actions may return cardNotification when a bookmark card is waiting; open it with reading_open_card, save it to a local file with reading_save_card, or clear it with reading_dismiss_card. Use reading_card_collection to browse cards by pages without loading every image. ` +
         `Use reading_import_book for small uploads, or reading_import_begin/part/finish for large files. ` +
         `If this server is running through src/server-sse.js, the same process can also serve the human reader at /, REST API at /api/*, SSE MCP at /sse, and JSON-RPC POST at /mcp. ` +
         `Data dir: ${dataDir}`,

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,17 @@ function compactText(value = "", max = 160) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1)).trim()}…`;
+}
+
+function safeFilePart(value = "reading-card") {
+  const text = String(value || "reading-card")
+    .trim()
+    .replace(/[\/\\?%*:|"<>]/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 80)
+    .replace(/^-|-$/g, "");
+  return text || "reading-card";
 }
 
 function hashText(value) {
@@ -369,4 +380,21 @@ export function renderCardImageContent(card) {
     mimeType: "image/svg+xml",
     data: Buffer.from(renderCardSvg(card), "utf8").toString("base64"),
   };
+}
+
+export function saveCardImage(card = {}, outputDir) {
+  if (!outputDir) throw new Error("outputDir is required");
+  mkdirSync(outputDir, { recursive: true });
+  const title = safeFilePart(card.title || card.bookTitle || card.id || "reading-card");
+  const id = safeFilePart(card.id || randomBytes(4).toString("hex"));
+  const basePath = path.join(outputDir, `${title}-${id}`);
+  try {
+    const pngPath = `${basePath}.png`;
+    writeFileSync(pngPath, renderCardPng(card));
+    return { path: pngPath, mimeType: "image/png" };
+  } catch {
+    const svgPath = `${basePath}.svg`;
+    writeFileSync(svgPath, renderCardSvg(card));
+    return { path: svgPath, mimeType: "image/svg+xml" };
+  }
 }

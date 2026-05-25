@@ -291,6 +291,16 @@ Input:
 
 Returns the selected card as image content so Claude can view it directly. If Playwright Chromium is installed, the card is rendered as a polished PNG from the same HTML/CSS card template used by the reader; otherwise the server falls back to an SVG image. The text part is only a short caption.
 
+## `reading_save_card`
+
+Input:
+
+```json
+{ "cardId": "card_..." }
+```
+
+Renders the selected card to a local image file and returns its absolute path plus `mimeType`. Use this when the host client can send local files after MCP returns a path.
+
 ## `reading_dismiss_card`
 
 Input:
