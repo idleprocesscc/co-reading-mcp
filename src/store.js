@@ -236,6 +236,187 @@ async function maybeCollectSectionCard({ manifest, targetChunk, progressEntry, f
   return cardSummary(card);
 }
 
+function finishKicker(seed) {
+  const lines = [
+    "收获了一枚合卷书签",
+    "最后一页翻过了",
+    "这本书合上了",
+    "页边还醒着",
+  ];
+  return lines[hashString(seed) % lines.length];
+}
+
+function finishFooter(shared, seed) {
+  if (shared) {
+    const lines = [
+      "two readers, one closed book",
+      "two margins, one last fold",
+      "read apart, folded together",
+    ];
+    return lines[hashString(seed) % lines.length];
+  }
+  const lines = [
+    "one reader carried it through",
+    "one quiet reader reached the end",
+    "carried through, page by page",
+  ];
+  return lines[hashString(seed) % lines.length];
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  for (const char of String(value || "")) {
+    hash ^= char.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function topCount(counts) {
+  const entries = Object.entries(counts || {}).filter(([key, count]) => key && Number(count) > 0);
+  if (!entries.length) return null;
+  const [key, count] = entries.sort((a, b) => Number(b[1]) - Number(a[1]))[0];
+  return { key, count: Number(count) };
+}
+
+function densityForBook(manifest, roots, maxPoints = 34) {
+  const chunks = sortedChunks(manifest);
+  const counts = chunks.map((chunk) => roots.filter((annotation) => annotation.chunkId === chunk.id).length);
+  if (counts.length <= maxPoints) return counts;
+  const bucketSize = counts.length / maxPoints;
+  return Array.from({ length: maxPoints }, (_, index) => {
+    const start = Math.floor(index * bucketSize);
+    const end = Math.max(start + 1, Math.floor((index + 1) * bucketSize));
+    return counts.slice(start, end).reduce((sum, value) => sum + value, 0);
+  });
+}
+
+function momentScore(annotation, replies = []) {
+  const kind = String(annotation?.kind || "annotation");
+  const mood = String(annotation?.mood || "");
+  const quoteLength = String(annotation?.quote || "").length;
+  const noteLength = String(annotation?.note || "").length;
+  return (kind === "resonance" ? 9 : kind === "feeling" ? 6 : kind === "summary" ? 4 : 2)
+    + (mood ? 1.5 : 0)
+    + Math.min(quoteLength / 80, 3)
+    + Math.min(noteLength / 130, 4)
+    + replies.length * 2;
+}
+
+function chooseBookFinishMoment(roots, replies) {
+  const repliesByParent = new Map();
+  for (const reply of replies) {
+    const parent = String(reply.parentId || "");
+    if (!parent) continue;
+    repliesByParent.set(parent, [...(repliesByParent.get(parent) || []), reply]);
+  }
+
+  const threaded = roots
+    .map((root) => {
+      const thread = [root, ...(repliesByParent.get(String(root.id)) || [])];
+      const hasHuman = thread.some((item) => isHumanAuthor(item.author));
+      const hasClaude = thread.some((item) => isClaudeAuthor(item.author));
+      const noteSource =
+        thread.filter((item) => isClaudeAuthor(item.author)).sort((a, b) => momentScore(b) - momentScore(a))[0]
+        || thread.sort((a, b) => momentScore(b) - momentScore(a))[0];
+      return { root, thread, noteSource, hasHuman, hasClaude, score: momentScore(root, thread.slice(1)) };
+    })
+    .filter((item) => item.hasHuman && item.hasClaude && String(item.root.quote || "").trim())
+    .sort((a, b) => b.score - a.score);
+  if (threaded[0]) return { root: threaded[0].root, noteSource: threaded[0].noteSource, shared: true, reason: "shared-thread" };
+
+  const byChunk = new Map();
+  for (const root of roots) {
+    const key = String(root.chunkId || "");
+    if (!key) continue;
+    byChunk.set(key, [...(byChunk.get(key) || []), root]);
+  }
+  const paired = Array.from(byChunk.values())
+    .filter((items) => items.some((item) => isHumanAuthor(item.author)) && items.some((item) => isClaudeAuthor(item.author)))
+    .flatMap((items) => items.filter((item) => isClaudeAuthor(item.author)).concat(items.filter((item) => isHumanAuthor(item.author))).slice(0, 1))
+    .filter((item) => String(item.quote || "").trim())
+    .sort((a, b) => momentScore(b) - momentScore(a));
+  if (paired[0]) return { root: paired[0], noteSource: paired[0], shared: true, reason: "shared-chunk" };
+
+  const claude = roots
+    .filter((item) => isClaudeAuthor(item.author) && String(item.quote || "").trim())
+    .sort((a, b) => momentScore(b) - momentScore(a));
+  if (claude[0]) return { root: claude[0], noteSource: claude[0], shared: false, reason: "claude-margin" };
+
+  const any = roots
+    .filter((item) => String(item.quote || "").trim())
+    .sort((a, b) => momentScore(b) - momentScore(a));
+  return { root: any[0], noteSource: any[0], shared: Boolean(any[0] && isHumanAuthor(any[0].author)), reason: "fallback" };
+}
+
+async function maybeCollectBookFinishCard({ manifest, progressEntry, finish = null }) {
+  const summary = progressSummary(manifest, progressEntry);
+  if (!summary.complete) return null;
+  const segmentKey = `${manifest.bookId}:book-finish`;
+  const existing = (await readAllCards()).find(
+    (card) => card.bookId === manifest.bookId && card.context?.segmentKey === segmentKey,
+  );
+  if (existing) return cardSummary(existing);
+
+  const annotations = visibleAnnotations(await readAllAnnotations());
+  const bookAnnotations = annotations.filter((annotation) => annotation.bookId === manifest.bookId);
+  const roots = bookAnnotations.filter((annotation) => !annotation.parentId);
+  const replies = bookAnnotations.filter((annotation) => annotation.parentId);
+  const moment = chooseBookFinishMoment(
+    roots.filter((annotation) => String(annotation.note || "").trim()),
+    replies.filter((annotation) => String(annotation.note || "").trim()),
+  );
+  const kindTop = topCount(countBy(roots.map((annotation) => annotation.kind || "annotation")));
+  const moodTop = topCount(countBy(roots.map((annotation) => annotation.mood).filter(Boolean)));
+  const stats = [
+    `${summary.chunkCount} chunks`,
+    `${roots.length} margins`,
+    kindTop ? `${kindTop.key} x ${kindTop.count}` : "",
+    moodTop ? `${moodTop.key} x ${moodTop.count}` : "",
+  ].filter(Boolean).join(" · ");
+  const seed = `${manifest.bookId}:book-finish:${moment.root?.id || ""}:${roots.length}:${summary.chunkCount}`;
+  const now = new Date().toISOString();
+  const card = {
+    id: `card_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+    bookId: manifest.bookId,
+    chunkId: summary.lastChunkId || sortedChunks(manifest).at(-1)?.id || null,
+    bookTitle: manifest.title,
+    chunkTitle: "合卷",
+    title: manifest.title || manifest.bookId,
+    subtitle: [manifest.author, "合卷书签"].filter(Boolean).join(" · "),
+    kicker: finishKicker(seed),
+    quote: moment.root?.quote || finish?.celebration?.line || "最后一页翻过，回声留在书里。",
+    note: moment.noteSource?.note || finish?.celebration?.prompt || "The book is closed, but the margins are still awake.",
+    footer: finishFooter(moment.shared, seed),
+    art: "lastfold",
+    artSeed: hashString(seed),
+    variant: moment.shared ? "shared-finish" : "solo-finish",
+    scope: "book",
+    source: "book-complete",
+    createdBy: "system",
+    createdAt: now,
+    status: "new",
+    stats,
+    context: {
+      scope: "book",
+      segmentKey,
+      trigger: "book-complete",
+      chunkCount: summary.chunkCount,
+      chunksRead: summary.chunksRead,
+      annotationCount: roots.length,
+      kindCounts: countBy(roots.map((annotation) => annotation.kind || "annotation")),
+      moodCounts: countBy(roots.map((annotation) => annotation.mood).filter(Boolean)),
+      density: densityForBook(manifest, roots),
+      selectedAnnotationId: moment.root?.id || null,
+      selectedReason: moment.reason,
+      shared: moment.shared,
+    },
+  };
+  await mkdir(dataDir, { recursive: true });
+  await appendFile(cardsPath, `${JSON.stringify(card)}\n`, "utf8");
+  return cardSummary(card);
+}
+
 export async function loadManifest(bookId) {
   const manifestPath = resolveInside(booksDir, bookId, "manifest.json");
   const signature = await fileSignature(manifestPath);
@@ -283,6 +464,11 @@ function countAnnotationRows(rows) {
 
 function isHumanAuthor(author) {
   return ["user", "human", "koshi", "you"].includes(String(author || "").toLowerCase());
+}
+
+function isClaudeAuthor(author) {
+  const value = String(author || "").toLowerCase();
+  return !isHumanAuthor(value) && (!value || value === "claude" || value === "assistant");
 }
 
 function isPrivateHumanAnnotation(annotation) {
@@ -623,7 +809,6 @@ export async function markRead(bookId, chunkId) {
       manifest,
       targetChunk,
       progressEntry: progress[bookId],
-      finish: result.finish || null,
     });
     if (collectedCard) {
       result.collectedCard = {
@@ -632,6 +817,22 @@ export async function markRead(bookId, chunkId) {
         title: collectedCard.title,
         subtitle: collectedCard.subtitle,
       };
+    }
+
+    if (summary.complete) {
+      const collectedBookCard = await maybeCollectBookFinishCard({
+        manifest,
+        progressEntry: progress[bookId],
+        finish: result.finish || null,
+      });
+      if (collectedBookCard) {
+        result.collectedBookCard = {
+          id: collectedBookCard.id,
+          message: collectedBookCard.kicker || "收获了一枚合卷书签",
+          title: collectedBookCard.title,
+          subtitle: collectedBookCard.subtitle,
+        };
+      }
     }
 
     const cardNotification = await latestCardNotification({ bookId });
@@ -689,13 +890,14 @@ function cardSummary(card) {
   return summary;
 }
 
-export async function listCards({ bookId, chunkId, source, limit = 20, offset = 0 } = {}) {
+export async function listCards({ bookId, chunkId, source, scope, limit = 20, offset = 0 } = {}) {
   const max = Math.min(Math.max(Number(limit) || 20, 1), 100);
   const start = Math.max(Number(offset) || 0, 0);
   return (await readAllCards())
     .filter((card) => !bookId || card.bookId === bookId)
     .filter((card) => !chunkId || card.chunkId === chunkId)
     .filter((card) => !source || card.source === source)
+    .filter((card) => !scope || (card.scope || card.context?.scope || "section") === scope)
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(start, start + max)
     .map(cardSummary);
@@ -718,21 +920,26 @@ export async function listCardCollection({ bookId, limit = 12, offset = 0 } = {}
   const max = Math.min(Math.max(Number(limit) || 12, 1), 50);
   const start = Math.max(Number(offset) || 0, 0);
   const all = await listCards({ bookId, limit: 10_000, offset: 0 });
-  const items = all.slice(start, start + max).map((card) => ({
+  const toItem = (card) => ({
     id: card.id,
     title: card.title || card.bookTitle || "Reading card",
     subtitle: card.subtitle || [card.bookTitle, card.chunkTitle].filter(Boolean).join(" · "),
     kicker: card.kicker || "收获了一枚回声书签",
     art: card.art || "fold",
+    scope: card.scope || card.context?.scope || "section",
     status: card.status || "new",
     createdAt: card.createdAt,
     hint: "Open with reading_open_card when you want to view the card image.",
-  }));
+  });
+  const bookCards = all.filter((card) => (card.scope || card.context?.scope) === "book").map(toItem);
+  const sectionCards = all.filter((card) => (card.scope || card.context?.scope || "section") !== "book");
+  const items = sectionCards.slice(start, start + max).map(toItem);
   return {
     offset: start,
     limit: max,
-    total: all.length,
-    nextOffset: start + max < all.length ? start + max : null,
+    total: sectionCards.length,
+    nextOffset: start + max < sectionCards.length ? start + max : null,
+    bookCards,
     items,
   };
 }
@@ -808,6 +1015,7 @@ export async function collectCard(input = {}) {
       footer: input.footer || "A small card from the margin.",
       art: input.art || "fold",
       variant: input.variant || "quiet",
+      scope: input.scope || (input.source === "book-complete" ? "book" : "section"),
       source: input.source || "manual",
       createdBy: input.createdBy || "human",
       createdAt: now,

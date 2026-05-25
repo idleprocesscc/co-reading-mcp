@@ -74,6 +74,28 @@ function wrapText(text, maxChars, maxLines) {
 
 function artSvg(card, width, height) {
   const random = seededRandom(card.artSeed || hashText(`${card.id}:${card.quote}:${card.note}`));
+  if (card.art === "lastfold" || (card.scope || card.context?.scope) === "book") {
+    const density = Array.isArray(card.context?.density) ? card.context.density.map((value) => Number(value) || 0) : [];
+    const max = Math.max(...density, 1);
+    const points = density.length ? density : Array.from({ length: 18 }, () => Math.floor(random() * 3));
+    const left = width * 0.15;
+    const right = width * 0.86;
+    const base = height * 0.34;
+    const amplitude = height * 0.09;
+    const pathLine = points.map((value, index) => {
+      const x = left + (right - left) * (points.length <= 1 ? 0 : index / (points.length - 1));
+      const y = base - (value / max) * amplitude + (random() - 0.5) * 5;
+      return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+    }).join(" ");
+    const spineX = width * (0.82 + random() * 0.05);
+    const spine = `<path d="M ${spineX.toFixed(1)} 34 C ${(spineX - 8).toFixed(1)} ${(height * 0.36).toFixed(1)} ${(spineX + 7).toFixed(1)} ${(height * 0.7).toFixed(1)} ${spineX.toFixed(1)} ${(height - 34).toFixed(1)}" fill="none" stroke="#514a42" stroke-width="0.8" opacity="0.11"/>`;
+    const quietLines = Array.from({ length: 8 }, () => {
+      const x = 44 + random() * (width - 88);
+      return `<path d="M ${x.toFixed(1)} 40 L ${(x + (random() - 0.5) * 16).toFixed(1)} ${(height - 46).toFixed(1)}" fill="none" stroke="#514a42" stroke-width="0.55" opacity="${(0.035 + random() * 0.07).toFixed(3)}"/>`;
+    }).join("");
+    const wave = `<path d="${pathLine}" fill="none" stroke="#6e665d" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" opacity="0.24"/>`;
+    return `${quietLines}${spine}<line x1="${(width * 0.13).toFixed(1)}" y1="${(height * 0.52).toFixed(1)}" x2="${(width * 0.87).toFixed(1)}" y2="${(height * 0.52).toFixed(1)}" stroke="#2b2722" stroke-width="0.7" opacity="0.10"/>${wave}`;
+  }
   if (card.art === "ripple") {
     const centers = [
       [width * (0.24 + random() * 0.1), height * (0.2 + random() * 0.08)],
@@ -115,12 +137,14 @@ function artSvg(card, width, height) {
 }
 
 function cardArtLabel(card = {}) {
+  if ((card.scope || card.context?.scope) === "book" || card.art === "lastfold") return "LAST FOLD";
   if (card.art === "ripple") return "ECHO BOOKMARK";
   if (card.art === "stardust") return "DUST TRACE";
   return "FOLDED MARGIN";
 }
 
 function cardArtClass(card = {}) {
+  if (card.art === "lastfold" || (card.scope || card.context?.scope) === "book") return "lastfold";
   if (card.art === "ripple") return "ripple";
   if (card.art === "stardust") return "stardust";
   return "fold";
@@ -146,14 +170,23 @@ function cardDisplaySubtitle(card = {}) {
 }
 
 function cardDisplayQuote(card = {}) {
-  return compactText(card.quote || "A passage worth carrying forward.", 64);
+  return compactText(card.quote || "A passage worth carrying forward.", (card.scope || card.context?.scope) === "book" ? 82 : 64);
 }
 
 function cardDisplayNote(card = {}) {
-  return compactText(card.note || "A small card from the margin.", 175);
+  return compactText(card.note || "A small card from the margin.", (card.scope || card.context?.scope) === "book" ? 210 : 175);
 }
 
 function cardPalette(card = {}) {
+  if (card.art === "lastfold" || (card.scope || card.context?.scope) === "book") {
+    return {
+      frame: "#dedbd3",
+      paper: "#faf7f0",
+      paperMid: "#eeeae1",
+      paperEnd: "#e7e8e0",
+      shadow: "rgba(55,47,38,.13)",
+    };
+  }
   if (card.art === "ripple") {
     return {
       frame: "#e4ded5",
@@ -210,7 +243,7 @@ export function renderCardSvg(card = {}) {
   <rect x="24.5" y="24.5" width="${width - 49}" height="${height - 49}" rx="47.5" fill="none" stroke="#ffffff" stroke-opacity="0.8"/>
   <g>${artSvg(card, width, height)}</g>
   <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', sans-serif" fill="#28241f">
-    <text x="76" y="92" font-size="20" font-weight="800" letter-spacing="2" fill="#9d968d">${escapeXml(compactText(card.sourceLabel || "READING CARD", 26).toUpperCase())}</text>
+    <text x="76" y="92" font-size="20" font-weight="800" letter-spacing="2" fill="#9d968d">${escapeXml(compactText(card.sourceLabel || cardArtLabel(card), 26).toUpperCase())}</text>
     <text x="76" y="146" font-size="22" font-weight="800" fill="#777168">${escapeXml(card.kicker || "收获了一枚回声书签")}</text>
     ${titleLines.map((line, index) => `<text x="76" y="${212 + index * 58}" font-size="50" font-weight="800">${escapeXml(line)}</text>`).join("")}
     <text x="76" y="${titleLines.length > 1 ? 334 : 282}" font-size="22" fill="#868078">${escapeXml(subtitle)}</text>
@@ -260,10 +293,12 @@ export function renderCardHtml(card = {}) {
   .card.compact { min-height: 560px; }
   .card.standard { min-height: 660px; }
   .card.tall { min-height: 760px; }
+  .card.lastfold { background: linear-gradient(145deg, #faf7f0, #eeeae1 60%, #e7e8e0); }
   .art { position: absolute; inset: 0; pointer-events: none; opacity: .68; }
   .fold .art { color: rgba(76,69,61,.42); }
   .ripple .art { color: rgba(102,86,72,.50); }
   .stardust .art { color: rgba(88,78,64,.66); }
+  .lastfold .art { opacity: .78; }
   .art svg { width: 100%; height: 100%; display: block; }
   .content { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 18px; }
   .compact .content { min-height: 490px; }
@@ -280,6 +315,12 @@ export function renderCardHtml(card = {}) {
   .kicker { margin: 0; color: #777168; font-size: 15px; font-weight: 800; }
   .title { margin: 0; font-size: 34px; line-height: 1.06; letter-spacing: 0; }
   .sub { margin: -8px 0 0; color: #868078; font-size: 14px; }
+  .book-meta {
+    margin: -8px 0 0;
+    color: #8f877c;
+    font-size: 12px;
+    line-height: 1.35;
+  }
   .quote {
     margin: 86px 0 0;
     padding: 0;
@@ -296,6 +337,9 @@ export function renderCardHtml(card = {}) {
     font-size: 14px;
     line-height: 1.55;
   }
+  .lastfold .quote { margin-top: 72px; }
+  .lastfold .note { border-top-color: rgba(40,36,31,.16); }
+  .lastfold .name { letter-spacing: .12em; }
   .note b {
     display: block;
     margin-bottom: 6px;
@@ -312,6 +356,7 @@ export function renderCardHtml(card = {}) {
     <p class="kicker">${escapeHtml(card.kicker || "收获了一枚回声书签")}</p>
     <h1 class="title">${escapeHtml(cardDisplayTitle(card))}</h1>
     <p class="sub">${escapeHtml(cardDisplaySubtitle(card))}</p>
+    ${(card.scope || card.context?.scope) === "book" && card.stats ? `<p class="book-meta">${escapeHtml(card.stats)}</p>` : ""}
     <blockquote class="quote">${escapeHtml(cardDisplayQuote(card))}</blockquote>
     <div class="note"><b>margin</b>${escapeHtml(cardDisplayNote(card))}</div>
     <p class="foot">${escapeHtml(card.footer || "a quiet mark left on the page")}</p>
