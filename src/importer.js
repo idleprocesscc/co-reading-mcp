@@ -166,7 +166,7 @@ async function runImport(filePath, options) {
   let stdout = "";
   let stderr = "";
   try {
-    const result = await execFileAsync("python3", args, {
+    const result = await execFileAsync(process.platform === "win32" ? "python" : "python3", args, {
       cwd: ROOT,
       maxBuffer: maxImportOutputBytes,
     });

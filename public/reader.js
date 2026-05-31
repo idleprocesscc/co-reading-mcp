@@ -49,6 +49,16 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+/** Light Markdown-ish formatting for annotation bodies (zero dependencies). */
+function formatNote(value) {
+  return escapeHtml(value)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/`(.+?)`/g, "<code>$1</code>")
+    .replace(/\n{2,}/g, "</p><p>")
+    .replace(/\n/g, "<br>");
+}
+
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -100,7 +110,7 @@ function replyClass(reply, root) {
 
 function renderReply(reply, root) {
   return `<div class="${replyClass(reply, root)}">
-    <p class="reply-body">${escapeHtml(reply.note)}</p>
+    <p class="reply-body">${formatNote(reply.note)}</p>
     <div class="note-meta">${escapeHtml(formatIdentity(reply.author))} · ${escapeHtml(reply.kind || "reply")}</div>
   </div>`;
 }
@@ -119,7 +129,7 @@ function renderThread(note, notes) {
 function renderInlineNote(note, notes) {
   return `<aside class="inline-note" data-note-id="${escapeHtml(note.id)}">
     <p class="inline-note-kicker">${escapeHtml(formatIdentity(note.author))} · ${escapeHtml(note.kind || "note")}</p>
-    <p class="note-body">${escapeHtml(note.note)}</p>
+    <p class="note-body">${formatNote(note.note)}</p>
     ${renderThread(note, notes)}
   </aside>`;
 }
@@ -204,7 +214,7 @@ function renderAnnotations() {
       return `<article class="note-card ${(note.status || "") === "open" ? "open" : ""} ${expanded ? "active" : ""}" data-note-id="${escapeHtml(note.id)}" tabindex="0">
         ${isShared ? `<p class="shared-line">这里有两个人的折痕。</p>` : ""}
         <p class="note-quote">${escapeHtml(note.quote)}</p>
-        <p class="note-body">${escapeHtml(note.note)}</p>
+        <p class="note-body">${formatNote(note.note)}</p>
         <div class="note-meta">${escapeHtml(formatIdentity(note.author))} · ${escapeHtml(note.kind || "note")} · ${escapeHtml(note.status || "published")}${replies.length ? ` · ${replies.length} replies` : ""}</div>
         ${
           expanded
@@ -507,7 +517,7 @@ $("note-selection").addEventListener("click", () => {
 });
 
 $("margins").addEventListener("click", (event) => {
-  if (event.target.closest("textarea, button")) return;
+  if (event.target.closest("textarea, button, .reply-form, .thread")) return;
   const card = event.target.closest(".note-card[data-note-id]");
   if (card) activateAnnotation(card.dataset.noteId);
 });
@@ -516,9 +526,11 @@ $("margins").addEventListener("submit", async (event) => {
   const form = event.target.closest(".reply-form");
   if (!form) return;
   event.preventDefault();
+  event.stopPropagation();
   const textarea = form.querySelector("textarea");
   const note = textarea.value.trim();
   if (!note) return;
+  const savedNoteId = state.activeAnnotationId;
   await api("/api/replies", {
     method: "POST",
     body: {
@@ -529,7 +541,9 @@ $("margins").addEventListener("submit", async (event) => {
     },
   });
   textarea.value = "";
+  state.activeAnnotationId = savedNoteId;
   await refreshCurrent();
+  if (savedNoteId) activateAnnotation(savedNoteId);
 });
 
 $("submit-notes").addEventListener("click", async () => {
@@ -621,7 +635,12 @@ $("import-file").addEventListener("change", async (event) => {
 });
 
 function showError(error) {
-  $("status").textContent = error.message || String(error);
+  const msg = error.message || String(error);
+  $("status").textContent = msg;
+  const toast = $("toast");
+  toast.textContent = msg;
+  toast.hidden = false;
+  toast.onclick = () => { toast.hidden = true; };
 }
 
 loadBooks().catch(showError);
