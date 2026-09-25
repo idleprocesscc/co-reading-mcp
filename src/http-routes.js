@@ -231,8 +231,9 @@ export async function handleApi(req, res, url, options = {}) {
 
   if (req.method === "GET" && parts.length === 4 && parts[1] === "cards" && parts[3] === "image.png") {
     const card = await readCard(parts[2]);
+    const png = await renderCardPng(card);
     res.writeHead(200, { "content-type": "image/png" });
-    res.end(renderCardPng(card));
+    res.end(png);
     return;
   }
 

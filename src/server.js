@@ -507,12 +507,12 @@ export async function callTool(name, args = {}) {
       const card = await readCard(args.cardId);
       return imageContent({
         text: `${card.kicker || "收获了一枚回声书签"}\n${card.title || card.bookTitle || "Reading card"}`,
-        image: renderCardImageContent(card),
+        image: await renderCardImageContent(card),
       });
     }
     case "reading_save_card": {
       const card = await readCard(args.cardId);
-      const saved = saveCardImage(card, path.join(dataDir, "card-exports"));
+      const saved = await saveCardImage(card, path.join(dataDir, "card-exports"));
       return textContent({
         cardId: card.id,
         ...saved,

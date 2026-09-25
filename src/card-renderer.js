@@ -1,12 +1,14 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { compactText, hashText } from "../public/card-logic.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const execFileAsync = promisify(execFile);
 
 function escapeXml(value = "") {
   return String(value)
@@ -350,58 +352,73 @@ export function renderCardHtml(card = {}) {
 </article>`;
 }
 
-function executableWorks(command) {
-  if (!command) return false;
-  const result = spawnSync(command, ["--version"], { stdio: "ignore" });
-  return result.status === 0;
-}
+// Cache the CLI lookup: probing runs `playwright --version`, which is slow. A miss is
+// re-checked after a few minutes so installing Playwright doesn't need a restart.
+const PLAYWRIGHT_MISS_TTL_MS = 5 * 60 * 1000;
+let playwrightLookup = null;
 
-function playwrightCommand() {
+async function findPlaywright() {
   const candidates = [
     process.env.PLAYWRIGHT_CLI,
     path.join(ROOT, "node_modules", ".bin", "playwright"),
-    "/opt/homebrew/bin/playwright",
     "playwright",
+    // Apps like Claude Desktop start MCP servers with a minimal PATH; try Homebrew's prefixes too.
+    "/opt/homebrew/bin/playwright",
+    "/usr/local/bin/playwright",
   ].filter(Boolean);
-  return candidates.find(executableWorks);
+  for (const command of candidates) {
+    try {
+      await execFileAsync(command, ["--version"], { timeout: 15_000 });
+      return command;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return null;
 }
 
-export function renderCardPng(card = {}) {
-  const bin = playwrightCommand();
+function playwrightCommand() {
+  if (!playwrightLookup || (playwrightLookup.command === null && Date.now() - playwrightLookup.at > PLAYWRIGHT_MISS_TTL_MS)) {
+    const at = Date.now();
+    playwrightLookup = { at, command: undefined, promise: findPlaywright() };
+    playwrightLookup.promise.then((command) => {
+      if (playwrightLookup?.at === at) playwrightLookup.command = command;
+    });
+  }
+  return playwrightLookup.promise;
+}
+
+/** Render a card to PNG with the Playwright CLI without blocking the server's event loop. */
+export async function renderCardPng(card = {}) {
+  const bin = await playwrightCommand();
   if (!bin) throw new Error("Playwright CLI not found; install it to enable PNG card rendering.");
   const token = randomBytes(8).toString("hex");
   const htmlPath = path.join(tmpdir(), `co-reading-card-${token}.html`);
   const pngPath = path.join(tmpdir(), `co-reading-card-${token}.png`);
-  writeFileSync(htmlPath, renderCardHtml(card));
-  const result = spawnSync(
-    bin,
-    [
-      "screenshot",
-      "--browser",
-      "chromium",
-      "--full-page",
-      "--viewport-size",
-      "396,1",
-      `file://${htmlPath}`,
-      pngPath,
-    ],
-    { encoding: "utf8" },
-  );
-  if (result.status !== 0 || !existsSync(pngPath)) {
-    throw new Error(result.stderr || result.stdout || `Playwright exited with ${result.status}`);
+  try {
+    await writeFile(htmlPath, renderCardHtml(card));
+    try {
+      await execFileAsync(
+        bin,
+        ["screenshot", "--browser", "chromium", "--full-page", "--viewport-size", "396,1", `file://${htmlPath}`, pngPath],
+        { timeout: 60_000 },
+      );
+    } catch (error) {
+      throw new Error(error.stderr || error.stdout || error.message);
+    }
+    return await readFile(pngPath);
+  } finally {
+    await rm(htmlPath, { force: true });
+    await rm(pngPath, { force: true });
   }
-  const png = readFileSync(pngPath);
-  try { unlinkSync(htmlPath); } catch {}
-  try { unlinkSync(pngPath); } catch {}
-  return png;
 }
 
-export function renderCardImageContent(card) {
+export async function renderCardImageContent(card) {
   try {
     return {
       type: "image",
       mimeType: "image/png",
-      data: renderCardPng(card).toString("base64"),
+      data: (await renderCardPng(card)).toString("base64"),
     };
   } catch {
     // Keep the zero-dependency server usable even when PNG rendering is not installed.
@@ -413,19 +430,19 @@ export function renderCardImageContent(card) {
   };
 }
 
-export function saveCardImage(card = {}, outputDir) {
+export async function saveCardImage(card = {}, outputDir) {
   if (!outputDir) throw new Error("outputDir is required");
-  mkdirSync(outputDir, { recursive: true });
+  await mkdir(outputDir, { recursive: true });
   const title = safeFilePart(card.title || card.bookTitle || card.id || "reading-card");
   const id = safeFilePart(card.id || randomBytes(4).toString("hex"));
   const basePath = path.join(outputDir, `${title}-${id}`);
   try {
     const pngPath = `${basePath}.png`;
-    writeFileSync(pngPath, renderCardPng(card));
+    await writeFile(pngPath, await renderCardPng(card));
     return { path: pngPath, mimeType: "image/png" };
   } catch {
     const svgPath = `${basePath}.svg`;
-    writeFileSync(svgPath, renderCardSvg(card));
+    await writeFile(svgPath, renderCardSvg(card));
     return { path: svgPath, mimeType: "image/svg+xml" };
   }
 }
