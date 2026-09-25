@@ -508,6 +508,14 @@ function isClaudeAuthor(author) {
   return !isHumanAuthor(value) && (!value || value === "claude" || value === "assistant");
 }
 
+/** Author filter: case-insensitive; user/human/koshi/you all mean the human reader. */
+function authorMatches(itemAuthor, author) {
+  const wanted = String(author).toLowerCase();
+  if (isHumanAuthor(wanted)) return isHumanAuthor(itemAuthor);
+  if (wanted === "claude" || wanted === "assistant") return isClaudeAuthor(itemAuthor);
+  return String(itemAuthor || "").toLowerCase() === wanted;
+}
+
 function isPrivateHumanAnnotation(annotation) {
   const status = annotation.status || "published";
   return isHumanAuthor(annotation.author) && ["open", "private", "draft"].includes(status);
@@ -1240,7 +1248,7 @@ export async function listAnnotations({ bookId, chunkId, kind, author, status, p
     .filter((item) => !bookId || item.bookId === bookId)
     .filter((item) => !chunkId || item.chunkId === chunkId)
     .filter((item) => !kind || item.kind === kind)
-    .filter((item) => !author || item.author === author)
+    .filter((item) => !author || authorMatches(item.author, author))
     .filter((item) => !status || (item.status || "published") === status)
     .filter((item) => parentId === undefined || (item.parentId || null) === parentId);
 }

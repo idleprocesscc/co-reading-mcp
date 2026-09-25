@@ -484,6 +484,10 @@ const hiddenBeforeSubmit = await request("tools/call", {
   name: "reading_list_annotations",
   arguments: { parentId: null, author: "user" },
 });
+const hiddenBeforeSubmitAlias = await request("tools/call", {
+  name: "reading_list_annotations",
+  arguments: { parentId: null, author: "Koshi" },
+});
 const firstSubmit = await request("tools/call", {
   name: "reading_submit_user_notes",
   arguments: { bookId: "anthropic-guidelines", sessionId: "session-a" },
@@ -491,6 +495,14 @@ const firstSubmit = await request("tools/call", {
 const visibleAfterSubmit = await request("tools/call", {
   name: "reading_list_annotations",
   arguments: { parentId: null, author: "user", status: "submitted" },
+});
+const visibleAfterSubmitAlias = await request("tools/call", {
+  name: "reading_list_annotations",
+  arguments: { parentId: null, author: "KOSHI", status: "submitted" },
+});
+const claudeAuthorAlias = await request("tools/call", {
+  name: "reading_list_annotations",
+  arguments: { bookId: "anthropic-guidelines", author: "Claude" },
 });
 const mcpSpoofNote = await request("tools/call", {
   name: "reading_annotate_passage",
@@ -985,8 +997,17 @@ if (contentJson(dismissedCard).status !== "dismissed" || contentJson(dismissedIn
 if (!badImportBookId.error?.message.includes("bookId may only contain")) {
   throw new Error("reading_import_book did not reject unsafe bookId");
 }
-if (contentJson(hiddenBeforeSubmit).length !== 0) {
+if (contentJson(hiddenBeforeSubmit).length !== 0 || contentJson(hiddenBeforeSubmitAlias).length !== 0) {
   throw new Error("reading_list_annotations exposed open human notes before submit");
+}
+if (
+  JSON.stringify(contentJson(visibleAfterSubmitAlias).map((note) => note.id)) !==
+  JSON.stringify(contentJson(visibleAfterSubmit).map((note) => note.id))
+) {
+  throw new Error("reading_list_annotations author filter did not treat koshi/user as the same reader");
+}
+if (!contentJson(claudeAuthorAlias).length || contentJson(claudeAuthorAlias).some((note) => note.author !== "claude")) {
+  throw new Error("reading_list_annotations author filter did not match Claude case-insensitively");
 }
 if (contentJson(firstSubmit).count !== 1) {
   throw new Error("reading_submit_user_notes did not submit the open user note");
