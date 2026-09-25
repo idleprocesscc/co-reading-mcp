@@ -1,8 +1,9 @@
-import { appendFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
-import { buildCardCandidates, pickCard } from "../public/card-logic.js";
+import { buildCardCandidates, hashText, isClaudeAuthor, isHumanAuthor, pickCard } from "../public/card-logic.js";
+import { resolveInside } from "./paths.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -21,13 +22,9 @@ const defaultTrashRetentionDays = 30;
 
 const manifestCache = new Map();
 const chunkTextCache = new Map();
-const annotationCache = {
-  signature: null,
-  rows: [],
-  bookCounts: new Map(),
-  chunkCounts: new Map(),
-};
+const annotationCache = {};
 let writeQueue = Promise.resolve();
+invalidateAnnotationCache();
 
 function invalidateAnnotationCache() {
   annotationCache.signature = null;
@@ -39,20 +36,47 @@ function invalidateAnnotationCache() {
   annotationCache.publicChunkCounts = new Map();
 }
 
-async function withWriteLock(operation) {
-  const run = writeQueue.then(operation, operation);
-  writeQueue = run.catch(() => {});
-  return run;
+// Writes are serialized in-process by writeQueue and across processes (e.g. src/server.js for
+// Claude plus src/http.js for the reader on the same data dir) by a lock directory: mkdir is
+// atomic, so only one process holds it. A lock left by a killed process expires.
+const lockDir = path.join(dataDir, ".write-lock");
+const LOCK_STALE_MS = 60_000;
+
+async function acquireDataLock() {
+  await mkdir(dataDir, { recursive: true });
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await mkdir(lockDir);
+      return;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    try {
+      const info = await stat(lockDir);
+      if (Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+        await rm(lockDir, { recursive: true, force: true });
+        continue;
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(10 * 2 ** attempt, 200)));
+  }
 }
 
-function resolveInside(baseDir, ...parts) {
-  const base = path.resolve(baseDir);
-  const resolved = path.resolve(base, ...parts);
-  const relative = path.relative(base, resolved);
-  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
-    return resolved;
-  }
-  throw new Error(`Path escapes data directory: ${parts.join("/")}`);
+async function withWriteLock(operation) {
+  const locked = async () => {
+    await acquireDataLock();
+    try {
+      return await operation();
+    } finally {
+      await rm(lockDir, { recursive: true, force: true });
+    }
+  };
+  const run = writeQueue.then(locked, locked);
+  writeQueue = run.catch(() => {});
+  return run;
 }
 
 async function readJson(filePath, fallback) {
@@ -74,15 +98,26 @@ async function fileSignature(filePath) {
   }
 }
 
-async function writeJson(filePath, value) {
+/** Replace a file in one step (write a temp file, then rename) so readers never see half of it. */
+async function writeFileAtomic(filePath, body) {
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const tempPath = `${filePath}.${process.pid}.${crypto.randomBytes(3).toString("hex")}.tmp`;
+  try {
+    await writeFile(tempPath, body, "utf8");
+    await rename(tempPath, filePath);
+  } catch (error) {
+    await rm(tempPath, { force: true });
+    throw error;
+  }
+}
+
+async function writeJson(filePath, value) {
+  await writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function writeJsonl(filePath, rows) {
-  await mkdir(path.dirname(filePath), { recursive: true });
   const body = rows.map((row) => JSON.stringify(row)).join("\n");
-  await writeFile(filePath, body ? `${body}\n` : "", "utf8");
+  await writeFileAtomic(filePath, body ? `${body}\n` : "");
 }
 
 function safeTrashName(value) {
@@ -118,6 +153,14 @@ async function pruneOldTrash(nowMs = Date.now()) {
     pruned += 1;
   }
   return { retentionDays, pruned };
+}
+
+/** Split items into [matching, rest]. */
+function partition(items, predicate) {
+  const matching = [];
+  const rest = [];
+  for (const item of items) (predicate(item) ? matching : rest).push(item);
+  return [matching, rest];
 }
 
 function asArray(value) {
@@ -280,7 +323,7 @@ function finishKicker(seed) {
     "这本书合上了",
     "页边还醒着",
   ];
-  return lines[hashString(seed) % lines.length];
+  return lines[hashText(seed) % lines.length];
 }
 
 function finishFooter(shared, seed) {
@@ -290,23 +333,14 @@ function finishFooter(shared, seed) {
       "two margins, one last fold",
       "read apart, folded together",
     ];
-    return lines[hashString(seed) % lines.length];
+    return lines[hashText(seed) % lines.length];
   }
   const lines = [
     "one reader carried it through",
     "one quiet reader reached the end",
     "carried through, page by page",
   ];
-  return lines[hashString(seed) % lines.length];
-}
-
-function hashString(value) {
-  let hash = 2166136261;
-  for (const char of String(value || "")) {
-    hash ^= char.codePointAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
+  return lines[hashText(seed) % lines.length];
 }
 
 function topCount(counts) {
@@ -426,7 +460,7 @@ async function maybeCollectBookFinishCard({ manifest, progressEntry, finish = nu
     note: moment.noteSource?.note || finish?.celebration?.prompt || "The book is closed, but the margins are still awake.",
     footer: finishFooter(moment.shared, seed),
     art: "lastfold",
-    artSeed: hashString(seed),
+    artSeed: hashText(seed),
     variant: moment.shared ? "shared-finish" : "solo-finish",
     scope: "book",
     source: "book-complete",
@@ -499,13 +533,12 @@ function countAnnotationRows(rows) {
   return { bookCounts, chunkCounts };
 }
 
-function isHumanAuthor(author) {
-  return ["user", "human", "koshi", "you"].includes(String(author || "").toLowerCase());
-}
-
-function isClaudeAuthor(author) {
-  const value = String(author || "").toLowerCase();
-  return !isHumanAuthor(value) && (!value || value === "claude" || value === "assistant");
+/** Author filter: case-insensitive; user/human/koshi/you all mean the human reader. */
+function authorMatches(itemAuthor, author) {
+  const wanted = String(author).toLowerCase();
+  if (isHumanAuthor(wanted)) return isHumanAuthor(itemAuthor);
+  if (wanted === "claude" || wanted === "assistant") return isClaudeAuthor(itemAuthor);
+  return String(itemAuthor || "").toLowerCase() === wanted;
 }
 
 function isPrivateHumanAnnotation(annotation) {
@@ -593,42 +626,25 @@ export async function deleteBook(bookId) {
     const cards = await readAllCards();
     const sessions = await readJson(sessionsPath, { sessions: {} });
 
-    const removedProgress = Object.fromEntries(
-      Object.entries(progress).filter(([id]) => bookIds.has(id)),
-    );
-    const keptProgress = Object.fromEntries(
-      Object.entries(progress).filter(([id]) => !bookIds.has(id)),
-    );
-    const removedAnnotations = annotations.filter((row) => rowReferencesBook(row, bookIds));
-    const keptAnnotations = annotations.filter((row) => !rowReferencesBook(row, bookIds));
-    const removedSubmissions = submissions.filter((row) => rowReferencesBook(row, bookIds));
-    const keptSubmissions = submissions.filter((row) => !rowReferencesBook(row, bookIds));
-    const removedCards = cards.filter((row) => rowReferencesBook(row, bookIds));
-    const keptCards = cards.filter((row) => !rowReferencesBook(row, bookIds));
+    const referencesBook = (row) => rowReferencesBook(row, bookIds);
+    const [removedProgressEntries, keptProgressEntries] = partition(Object.entries(progress), ([id]) => bookIds.has(id));
+    const removedProgress = Object.fromEntries(removedProgressEntries);
+    const keptProgress = Object.fromEntries(keptProgressEntries);
+    const [removedAnnotations, keptAnnotations] = partition(annotations, referencesBook);
+    const [removedSubmissions, keptSubmissions] = partition(submissions, referencesBook);
+    const [removedCards, keptCards] = partition(cards, referencesBook);
 
     const keptSessions = { sessions: {} };
     const removedSessions = { sessions: {} };
     for (const [sessionId, session] of Object.entries(sessions.sessions || {})) {
-      const chunkEntries = Object.entries(session.chunks || {});
-      const annotationEntries = Object.entries(session.annotations || {});
-      const keptChunks = Object.fromEntries(
-        chunkEntries.filter(([key, value]) => {
-          const keyBookId = key.split("/")[0];
-          return !bookIds.has(keyBookId) && !bookIds.has(value?.bookId);
-        }),
-      );
-      const removedChunks = Object.fromEntries(
-        chunkEntries.filter(([key, value]) => {
-          const keyBookId = key.split("/")[0];
-          return bookIds.has(keyBookId) || bookIds.has(value?.bookId);
-        }),
-      );
-      const keptSessionAnnotations = Object.fromEntries(
-        annotationEntries.filter(([, value]) => !bookIds.has(value?.bookId)),
-      );
-      const removedSessionAnnotations = Object.fromEntries(
-        annotationEntries.filter(([, value]) => bookIds.has(value?.bookId)),
-      );
+      const [removedChunks, keptChunks] = partition(
+        Object.entries(session.chunks || {}),
+        ([key, value]) => bookIds.has(key.split("/")[0]) || bookIds.has(value?.bookId),
+      ).map(Object.fromEntries);
+      const [removedSessionAnnotations, keptSessionAnnotations] = partition(
+        Object.entries(session.annotations || {}),
+        ([, value]) => bookIds.has(value?.bookId),
+      ).map(Object.fromEntries);
       if (Object.keys(keptChunks).length || Object.keys(keptSessionAnnotations).length) {
         keptSessions.sessions[sessionId] = { ...session, chunks: keptChunks, annotations: keptSessionAnnotations };
       }
@@ -728,6 +744,46 @@ export async function readChunk(bookId, chunkId) {
     nextId: chunk.nextId ?? null,
     text,
   };
+}
+
+function assetError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+/**
+ * Resolve an image kept by `import_epub.py --keep-images` ([[img:assets/<file>]]).
+ * Only files inside the book's assets/ folder are served; symlinks that leave it are refused.
+ */
+export async function resolveBookAsset(bookId, segments) {
+  const badSegment = (segment) => !segment || segment === "." || segment === ".." || /[\\/\0]/.test(segment);
+  if (badSegment(bookId) || !segments.length || segments.some(badSegment)) {
+    throw assetError(400, "Bad asset path");
+  }
+  if (segments[0] !== "assets" || segments.length < 2) throw assetError(404, "Not found");
+  try {
+    await loadManifest(bookId);
+  } catch {
+    throw assetError(404, "Not found");
+  }
+
+  const bookDir = resolveInside(booksDir, bookId);
+  let assetsDir;
+  let assetPath;
+  try {
+    const realBookDir = await realpath(bookDir);
+    assetsDir = await realpath(path.join(bookDir, "assets"));
+    if (!assetsDir.startsWith(realBookDir + path.sep)) throw assetError(403, "Forbidden");
+    assetPath = await realpath(path.join(bookDir, ...segments));
+  } catch (error) {
+    if (error.statusCode) throw error;
+    throw assetError(404, "Not found");
+  }
+  if (!assetPath.startsWith(assetsDir + path.sep)) throw assetError(403, "Forbidden");
+  const info = await stat(assetPath);
+  if (!info.isFile()) throw assetError(404, "Not found");
+  return { path: assetPath, size: info.size, mtimeMs: info.mtimeMs, mtime: info.mtime };
 }
 
 async function resolveContinueBook(bookId) {
@@ -1051,22 +1107,31 @@ function cardSummary(card) {
   return summary;
 }
 
+function cardScope(card) {
+  return card.scope || card.context?.scope || "section";
+}
+
+/** All cards for a book (or every book), newest first. */
+async function newestCards(bookId) {
+  return (await readAllCards())
+    .filter((card) => !bookId || card.bookId === bookId)
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+}
+
 export async function listCards({ bookId, chunkId, source, scope, limit = 20, offset = 0 } = {}) {
   const max = Math.min(Math.max(Number(limit) || 20, 1), 100);
   const start = Math.max(Number(offset) || 0, 0);
-  return (await readAllCards())
-    .filter((card) => !bookId || card.bookId === bookId)
+  return (await newestCards(bookId))
     .filter((card) => !chunkId || card.chunkId === chunkId)
     .filter((card) => !source || card.source === source)
-    .filter((card) => !scope || (card.scope || card.context?.scope || "section") === scope)
-    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .filter((card) => !scope || cardScope(card) === scope)
     .slice(start, start + max)
     .map(cardSummary);
 }
 
 export async function listCardInbox({ bookId, limit = 10 } = {}) {
   const max = Math.min(Math.max(Number(limit) || 10, 1), 100);
-  return (await listCards({ bookId, limit: 10_000, offset: 0 }))
+  return (await newestCards(bookId))
     .filter((card) => (card.status || "new") !== "dismissed")
     .slice(0, max)
     .map((card) => ({
@@ -1082,20 +1147,20 @@ export async function listCardInbox({ bookId, limit = 10 } = {}) {
 export async function listCardCollection({ bookId, limit = 12, offset = 0 } = {}) {
   const max = Math.min(Math.max(Number(limit) || 12, 1), 50);
   const start = Math.max(Number(offset) || 0, 0);
-  const all = await listCards({ bookId, limit: 10_000, offset: 0 });
+  const all = await newestCards(bookId);
   const toItem = (card) => ({
     id: card.id,
     title: card.title || card.bookTitle || "Reading card",
     subtitle: card.subtitle || [card.bookTitle, card.chunkTitle].filter(Boolean).join(" · "),
     kicker: card.kicker || "收获了一枚回声书签",
     art: card.art || "fold",
-    scope: card.scope || card.context?.scope || "section",
+    scope: cardScope(card),
     status: card.status || "new",
     createdAt: card.createdAt,
     hint: "Open with reading_open_card when you want to view the card image.",
   });
-  const bookCards = all.filter((card) => (card.scope || card.context?.scope) === "book").map(toItem);
-  const sectionCards = all.filter((card) => (card.scope || card.context?.scope || "section") !== "book");
+  const bookCards = all.filter((card) => cardScope(card) === "book").map(toItem);
+  const sectionCards = all.filter((card) => cardScope(card) !== "book");
   const items = sectionCards.slice(start, start + max).map(toItem);
   return {
     offset: start,
@@ -1200,7 +1265,7 @@ export async function listAnnotations({ bookId, chunkId, kind, author, status, p
     .filter((item) => !bookId || item.bookId === bookId)
     .filter((item) => !chunkId || item.chunkId === chunkId)
     .filter((item) => !kind || item.kind === kind)
-    .filter((item) => !author || item.author === author)
+    .filter((item) => !author || authorMatches(item.author, author))
     .filter((item) => !status || (item.status || "published") === status)
     .filter((item) => parentId === undefined || (item.parentId || null) === parentId);
 }
@@ -1249,19 +1314,22 @@ export async function annotatePassage(input) {
       quoteOffset: quoteOffset >= 0 ? quoteOffset : null,
       prevId: chunk.prevId,
       nextId: chunk.nextId,
-      annotationIndexInBook,
-      annotationIndexInChunk,
-      replyIndex,
       createdAt: new Date().toISOString(),
     };
-    annotation.message = parentId
-      ? `Saved reply ${replyIndex} under annotation ${parentId}.`
-      : `Saved annotation ${annotationIndexInBook} in this book (${annotationIndexInChunk} in this chunk).`;
 
     await mkdir(dataDir, { recursive: true });
     await appendFile(annotationsPath, `${JSON.stringify(annotation)}\n`, "utf8");
     invalidateAnnotationCache();
-    return annotation;
+    // Counts and the message are feedback for the caller only; they go stale, so they aren't stored.
+    return {
+      ...annotation,
+      annotationIndexInBook,
+      annotationIndexInChunk,
+      replyIndex,
+      message: parentId
+        ? `Saved reply ${replyIndex} under annotation ${parentId}.`
+        : `Saved annotation ${annotationIndexInBook} in this book (${annotationIndexInChunk} in this chunk).`,
+    };
   });
 }
 

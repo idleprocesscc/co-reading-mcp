@@ -106,7 +106,15 @@ In the reader:
 
 The server sends each note once and marks it submitted so the next send does not duplicate it.
 
-Replies that you type under Claude's margin notes follow the same rule: they are saved as open user replies first, then included the next time you click `Send to Claude`.
+Replies that you type under Claude's margin notes follow the same rule: they are saved as open user replies first, then included the next time you click `Send to Claude`. Every reply in a thread has its own small `Reply` link, so you can answer one particular message instead of only the thread's first note.
+
+The address bar keeps the open book and chapter (`#/book/<bookId>/<chunkId>`), so reloading the page returns to the same place. `←` / `→` move to the previous or next chunk when you are not typing.
+
+## Books With Images
+
+Leave `Keep EPUB images on import` checked in the Library panel (or pass `--keep-images` to `scripts/import_epub.py`) to keep an EPUB's pictures and formula images. Figures and display formulas show on their own line; inline formulas sit inside the sentence at text height. Dark mode inverts them so black-on-white art stays readable.
+
+Highlighting across an image works: the saved quote keeps the image placeholder, so the note anchors to the same spot and Claude sees where the formula was.
 
 ## Claude Notes and Replies
 
@@ -139,6 +147,8 @@ EPUB:
 
 ```bash
 python3 scripts/import_epub.py ./book.epub --out ./data/books
+# keep pictures and formula images:
+python3 scripts/import_epub.py ./book.epub --out ./data/books --keep-images
 ```
 
 TXT with chapter headings:

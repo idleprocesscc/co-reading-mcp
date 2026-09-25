@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,7 @@ import {
   readCard,
   readChunk,
   replyToAnnotation,
+  resolveBookAsset,
   searchChunks,
   submitUserNotes,
 } from "./store.js";
@@ -28,12 +30,23 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const publicDir = path.join(ROOT, "public");
 const defaultMaxBodyBytes = Number(process.env.READING_HTTP_MAX_BODY_BYTES || process.env.READING_IMPORT_MAX_BYTES || 25_000_000);
 
+const imageContentTypes = {
+  ".avif": "image/avif",
+  ".bmp": "image/bmp",
+  ".gif": "image/gif",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".webp": "image/webp",
+};
+
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
+  ...imageContentTypes,
 };
 
 export function sendJson(res, status, value) {
@@ -73,7 +86,66 @@ function routeParts(url) {
     .map((part) => decodeURIComponent(part));
 }
 
+function etagMatches(header, etag) {
+  return String(header || "")
+    .split(",")
+    .map((value) => value.trim())
+    .some((value) => value === "*" || value === etag || value.replace(/^W\//, "") === etag.replace(/^W\//, ""));
+}
+
+async function serveBookAsset(req, res, rawPath) {
+  const match = rawPath.match(/^\/api\/books\/([^/]+)\/asset\/(.*)$/);
+  let bookId;
+  let segments;
+  try {
+    bookId = decodeURIComponent(match[1]);
+    segments = match[2].split("/").map((segment) => decodeURIComponent(segment));
+  } catch {
+    return sendError(res, 400, "Bad asset path");
+  }
+
+  let asset;
+  try {
+    asset = await resolveBookAsset(bookId, segments);
+  } catch (error) {
+    return sendError(res, error.statusCode || 404, error.statusCode ? error.message : "Not found");
+  }
+
+  const etag = `W/"${asset.size.toString(16)}-${Math.floor(asset.mtimeMs).toString(16)}"`;
+  const cacheControl = "private, max-age=604800";
+  if (etagMatches(req.headers["if-none-match"], etag)) {
+    res.writeHead(304, { etag, "cache-control": cacheControl });
+    res.end();
+    return;
+  }
+  res.writeHead(200, {
+    "content-type": imageContentTypes[path.extname(asset.path).toLowerCase()] || "application/octet-stream",
+    "content-length": String(asset.size),
+    "cache-control": cacheControl,
+    "last-modified": asset.mtime.toUTCString(),
+    etag,
+    "x-content-type-options": "nosniff",
+    // EPUB SVGs can carry scripts; never let an asset run as a page on this origin.
+    "content-security-policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox",
+  });
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+  const stream = createReadStream(asset.path);
+  stream.on("error", () => res.destroy());
+  stream.pipe(res);
+}
+
 export async function handleApi(req, res, url, options = {}) {
+  // Images kept by --keep-images: [[img:assets/<file>]] -> /api/books/:bookId/asset/assets/<file>.
+  // Parsed from the raw request path so "..", "%2e%2e" and "%2F" are refused rather than
+  // normalized away by URL parsing.
+  const rawPath = String(req.url || "").split(/[?#]/, 1)[0];
+  if ((req.method === "GET" || req.method === "HEAD") && /^\/api\/books\/[^/]+\/asset\//.test(rawPath)) {
+    return serveBookAsset(req, res, rawPath);
+  }
+
   const parts = routeParts(url);
   const maxBytes = options.maxBodyBytes || defaultMaxBodyBytes;
 
@@ -159,8 +231,9 @@ export async function handleApi(req, res, url, options = {}) {
 
   if (req.method === "GET" && parts.length === 4 && parts[1] === "cards" && parts[3] === "image.png") {
     const card = await readCard(parts[2]);
+    const png = await renderCardPng(card);
     res.writeHead(200, { "content-type": "image/png" });
-    res.end(renderCardPng(card));
+    res.end(png);
     return;
   }
 

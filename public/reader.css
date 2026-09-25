@@ -222,6 +222,63 @@ h2 {
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
+/* Book images from [[img:assets/<file>]] tokens. */
+.text img.book-figure {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  /* The text after a figure starts with its own line break; pull it up one line. */
+  margin-bottom: -1.78em;
+  margin-bottom: -1lh;
+}
+
+.book-inline {
+  width: auto;
+  max-width: 100%;
+  height: 1.2em;
+  margin: 0 0.08em;
+  vertical-align: middle;
+}
+
+.book-inline.tall {
+  height: 2.2em;
+}
+
+.text img,
+.note-quote img,
+.quote-preview img {
+  mix-blend-mode: multiply;
+}
+
+.image-missing {
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+.import-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -12px 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.reply-to {
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reply > .reply-form {
+  margin-top: 8px;
+}
+
 .shared-bookmark {
   display: inline-block;
   margin-left: 0.35em;
@@ -446,7 +503,8 @@ h2 {
 .card-art {
   position: absolute;
   inset: 0;
-  color: rgba(155, 115, 85, 0.75);
+  /* Same ink as the exported card images (src/card-renderer.js). */
+  color: #584e40;
   pointer-events: none;
 }
 
@@ -479,18 +537,6 @@ h2 {
   background:
     radial-gradient(circle at 76% 12%, rgba(255, 255, 255, 0.5), transparent 30%),
     linear-gradient(145deg, #f8f3ec, #eee9df 58%, #e6e5dc);
-}
-
-.ritual-card.art-ripple .card-art {
-  color: rgba(116, 96, 78, 0.52);
-}
-
-.ritual-card.art-fold .card-art {
-  color: rgba(88, 80, 72, 0.45);
-}
-
-.ritual-card.art-stardust .card-art {
-  color: rgba(98, 86, 70, 0.62);
 }
 
 .ritual-card.finish {
@@ -822,5 +868,13 @@ button:disabled {
 
   .reply.other-author {
     background: rgba(255, 255, 255, 0.07);
+  }
+
+  /* Book art is black on white: invert it and let the black background drop out. */
+  .text img,
+  .note-quote img,
+  .quote-preview img {
+    mix-blend-mode: lighten;
+    filter: invert(1) hue-rotate(180deg) brightness(0.9);
   }
 }

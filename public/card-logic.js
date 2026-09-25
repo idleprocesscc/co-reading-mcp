@@ -30,7 +30,11 @@ export function normalizeForOverlap(value) {
 }
 
 export function compactText(value, max = 120) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
+  // Cards can't show book images; keep a small mark where a [[img:...]] token was.
+  const text = String(value || "")
+    .replace(/\[\[img:[^\]\n]+\]\]/g, "▣")
+    .replace(/\s+/g, " ")
+    .trim();
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1)).trim()}…`;
 }

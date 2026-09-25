@@ -1,3 +1,4 @@
+import { cardArtSvg } from "./card-art.js";
 import { buildCardCandidates, pickCard, sharedNoteIdSet } from "./card-logic.js";
 
 const state = {
@@ -19,6 +20,7 @@ const state = {
   refreshInFlight: false,
   composing: false,
   replyDrafts: {},
+  replyTargetId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -26,7 +28,7 @@ const authTokenKey = "co-reading-auth-token";
 const urlToken = new URLSearchParams(location.search).get("token");
 if (urlToken) {
   localStorage.setItem(authTokenKey, urlToken);
-  history.replaceState(null, "", location.pathname);
+  history.replaceState(null, "", location.pathname + location.hash);
 }
 
 async function api(path, options = {}) {
@@ -61,6 +63,67 @@ function formatNote(value) {
     .replace(/`(.+?)`/g, "<code>$1</code>")
     .replace(/\n{2,}/g, "</p><p>")
     .replace(/\n/g, "<br>");
+}
+
+// Images kept by `import_epub.py --keep-images` appear in chunk text as [[img:assets/<file>]].
+const IMAGE_TOKEN_RE = /\[\[img:([^\]\n]+?)\]\]/g;
+
+function assetUrl(relPath, bookId = state.bookId) {
+  const encodedPath = String(relPath).split("/").map(encodeURIComponent).join("/");
+  return `/api/books/${encodeURIComponent(bookId || "")}/asset/${encodedPath}`;
+}
+
+/** Image tokens with their [start, end) offsets; a token alone on its line is a figure. */
+function imageTokens(text) {
+  const tokens = [];
+  for (const match of String(text || "").matchAll(IMAGE_TOKEN_RE)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+    const lineBreak = text.indexOf("\n", end);
+    const line = text.slice(lineStart, lineBreak < 0 ? text.length : lineBreak);
+    tokens.push({ start, end, path: match[1].trim(), block: !line.replace(IMAGE_TOKEN_RE, "").trim() });
+  }
+  return tokens;
+}
+
+function imageHtml(token) {
+  return `<img class="${token.block ? "book-figure" : "book-inline"}" src="${escapeHtml(assetUrl(token.path))}" alt="" loading="lazy">`;
+}
+
+/** Escape text[start:end) and turn the image tokens inside it into <img> tags. */
+function renderTextRange(text, start, end, tokens) {
+  let html = "";
+  let cursor = start;
+  for (const token of tokens) {
+    if (token.start < cursor || token.end > end) continue;
+    html += escapeHtml(text.slice(cursor, token.start)) + imageHtml(token);
+    cursor = token.end;
+  }
+  return html + escapeHtml(text.slice(cursor, end));
+}
+
+/** Quote text for margins and previews, with images shown small and inline. */
+function quoteHtml(quote) {
+  const text = String(quote || "");
+  return renderTextRange(text, 0, text.length, imageTokens(text).map((token) => ({ ...token, block: false })));
+}
+
+/** Chunk text as the reader shows it (tokens removed) plus each character's offset in the chunk. */
+function displayText(text) {
+  let display = "";
+  const offsets = [];
+  let cursor = 0;
+  const copy = (from, to) => {
+    display += text.slice(from, to);
+    for (let index = from; index < to; index += 1) offsets.push(index);
+  };
+  for (const token of imageTokens(text)) {
+    copy(cursor, token.start);
+    cursor = token.end;
+  }
+  copy(cursor, text.length);
+  return { display, offsets };
 }
 
 function fileToBase64(file) {
@@ -130,7 +193,10 @@ function renderReply(reply, root, notes, depth = 1, seen = new Set()) {
   const visibleDepth = Math.min(depth, 4);
   return `<div class="${replyClass(reply, root)}" style="--reply-depth: ${visibleDepth}">
     <p class="reply-body">${formatNote(reply.note)}</p>
-    <div class="note-meta">${escapeHtml(formatIdentity(reply.author))} · ${escapeHtml(reply.kind || "reply")}</div>
+    <div class="note-meta">${escapeHtml(formatIdentity(reply.author))} · ${escapeHtml(reply.kind || "reply")}
+      <button type="button" class="reply-to" data-reply-to="${escapeHtml(reply.id)}">Reply</button>
+    </div>
+    ${state.replyTargetId === reply.id ? replyFormHtml(reply.id, "Reply to this...") : ""}
     ${
       children.length
         ? `<div class="reply-children">${children
@@ -141,15 +207,19 @@ function renderReply(reply, root, notes, depth = 1, seen = new Set()) {
   </div>`;
 }
 
+function replyFormHtml(parentId, placeholder) {
+  const draft = state.replyDrafts[parentId] || "";
+  return `<form class="reply-form" data-parent-id="${escapeHtml(parentId)}">
+      <textarea rows="2" placeholder="${escapeHtml(placeholder)}">${escapeHtml(draft)}</textarea>
+      <button type="submit" class="primary-button">Reply</button>
+    </form>`;
+}
+
 function renderThread(note, notes) {
   const replies = repliesFor(note.id, notes);
-  const draft = state.replyDrafts[note.id] || "";
   return `<div class="thread">
     ${replies.map((reply) => renderReply(reply, note, notes, 1, new Set([note.id]))).join("")}
-    <form class="reply-form" data-parent-id="${escapeHtml(note.id)}">
-      <textarea rows="2" placeholder="Reply in this margin...">${escapeHtml(draft)}</textarea>
-      <button type="submit" class="primary-button">Reply</button>
-    </form>
+    ${replyFormHtml(note.id, "Reply in this margin...")}
   </div>`;
 }
 
@@ -193,6 +263,7 @@ function renderChunks() {
 function renderText() {
   if (!state.chunk) return;
   const text = state.chunk.text || "";
+  const tokens = imageTokens(text);
   const notes = state.annotations.filter((item) => item.chunkId === state.chunkId);
   const sharedIds = sharedNoteIdSet(notes);
   const highlights = [];
@@ -212,24 +283,30 @@ function renderText() {
         ? requestedOffset
         : text.indexOf(quote);
     if (!quote || start < 0) continue;
-    const end = start + quote.length;
-    if (occupied.some((range) => start < range.end && end > range.start)) continue;
-    occupied.push({ start, end });
-    highlights.push({ start, end, note, shared: sharedIds.has(note.id) });
+    let from = start;
+    let end = start + quote.length;
+    // Never cut an image token in half: widen the highlight to whole tokens.
+    for (const token of tokens) {
+      if (token.start < from && from < token.end) from = token.start;
+      if (token.start < end && end < token.end) end = token.end;
+    }
+    if (occupied.some((range) => from < range.end && end > range.start)) continue;
+    occupied.push({ start: from, end });
+    highlights.push({ start: from, end, note, shared: sharedIds.has(note.id) });
   }
 
   let html = "";
   let cursor = 0;
   for (const highlight of highlights) {
-    html += escapeHtml(text.slice(cursor, highlight.start));
-    const quote = escapeHtml(text.slice(highlight.start, highlight.end));
+    html += renderTextRange(text, cursor, highlight.start, tokens);
+    const quote = renderTextRange(text, highlight.start, highlight.end, tokens);
     const bookmark = highlight.shared ? `<span class="shared-bookmark" title="这里有两个人的折痕。">此处有回声</span>` : "";
     html += `<mark class="${highlight.note.id === state.activeAnnotationId ? "active" : ""} ${highlight.shared ? "shared" : ""}" data-note-id="${escapeHtml(highlight.note.id)}" title="${escapeHtml(highlight.note.note)}">${quote}</mark>${bookmark}${
       highlight.note.id === state.activeAnnotationId ? renderInlineNote(highlight.note, notes) : ""
     }`;
     cursor = highlight.end;
   }
-  html += escapeHtml(text.slice(cursor));
+  html += renderTextRange(text, cursor, text.length, tokens);
   $("text").innerHTML = html;
   bindMarkActions();
 }
@@ -258,7 +335,7 @@ function renderAnnotations() {
       const isShared = sharedNoteIdSet(notes).has(note.id);
       return `<article class="note-card ${(note.status || "") === "open" ? "open" : ""} ${expanded ? "active" : ""}" data-note-id="${escapeHtml(note.id)}" tabindex="0">
         ${isShared ? `<p class="shared-line">这里有两个人的折痕。</p>` : ""}
-        <p class="note-quote">${escapeHtml(note.quote)}</p>
+        <p class="note-quote">${quoteHtml(note.quote)}</p>
         <p class="note-body">${formatNote(note.note)}</p>
         <div class="note-meta">${escapeHtml(formatIdentity(note.author))} · ${escapeHtml(note.kind || "note")} · ${escapeHtml(note.status || "published")}${replies ? ` · ${replies} replies` : ""}</div>
         ${
@@ -313,65 +390,8 @@ function renderCardPanel() {
   $("card-preview").innerHTML = renderReadingCard(card);
 }
 
-function seededRandom(seed) {
-  let value = (Number(seed) || 1) >>> 0;
-  return () => {
-    value ^= value << 13;
-    value ^= value >>> 17;
-    value ^= value << 5;
-    return (value >>> 0) / 4294967296;
-  };
-}
-
 function readingCardArt(card) {
-  const random = seededRandom(card.artSeed || 1);
-  if (card.art === "ripple") {
-    const centers = [
-      [25 + random() * 18, 20 + random() * 18],
-      [58 + random() * 18, 48 + random() * 18],
-      [22 + random() * 14, 72 + random() * 12],
-    ];
-    const circles = centers
-      .flatMap(([cx, cy], groupIndex) =>
-        Array.from({ length: groupIndex === 1 ? 4 : 3 }, (_, index) => {
-          const radius = 8 + index * (6 + random() * 3) + random() * 2;
-          const opacity = 0.035 + random() * 0.06;
-          return `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(2)}" opacity="${opacity.toFixed(3)}" />`;
-        }),
-      )
-      .join("");
-    return `<svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="0.36">${circles}</g></svg>`;
-  }
-  if (card.art === "stardust") {
-    const dots = Array.from({ length: 64 }, () => {
-      const cx = 7 + random() * 86;
-      const cy = 8 + random() * 80;
-      const radius = 0.08 + random() * 0.24;
-      const opacity = 0.18 + random() * 0.42;
-      return `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(2)}" opacity="${opacity.toFixed(3)}" />`;
-    }).join("");
-    const bright = Array.from({ length: 7 }, () => {
-      const cx = 12 + random() * 76;
-      const cy = 12 + random() * 72;
-      const opacity = 0.22 + random() * 0.26;
-      return `<path d="M ${(cx - 0.9).toFixed(2)} ${cy.toFixed(2)} L ${(cx + 0.9).toFixed(2)} ${cy.toFixed(2)} M ${cx.toFixed(2)} ${(cy - 0.9).toFixed(2)} L ${cx.toFixed(2)} ${(cy + 0.9).toFixed(2)}" opacity="${opacity.toFixed(3)}" />`;
-    }).join("");
-    const lines = Array.from({ length: 5 }, () => {
-      const x1 = 8 + random() * 84;
-      const y1 = 10 + random() * 76;
-      const x2 = x1 + (random() - 0.5) * 12;
-      const y2 = y1 + (random() - 0.5) * 12;
-      return `<path d="M ${x1.toFixed(2)} ${y1.toFixed(2)} L ${x2.toFixed(2)} ${y2.toFixed(2)}" opacity="0.07" />`;
-    }).join("");
-    return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><g fill="currentColor">${dots}</g><g fill="none" stroke="currentColor" stroke-width="0.14">${lines}${bright}</g></svg>`;
-  }
-  const lines = Array.from({ length: 14 }, () => {
-    const x = 8 + random() * 84;
-    const drift = (random() - 0.5) * 10;
-    const opacity = 0.06 + random() * 0.14;
-    return `<path d="M ${x.toFixed(2)} 3 C ${(x + drift).toFixed(2)} 30 ${(x - drift).toFixed(2)} 62 ${x.toFixed(2)} 97" opacity="${opacity.toFixed(3)}" />`;
-  }).join("");
-  return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="0.32">${lines}</g></svg>`;
+  return `<svg viewBox="0 0 420 460" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${cardArtSvg(card, 420, 460)}</svg>`;
 }
 
 function renderReadingCard(card) {
@@ -471,11 +491,22 @@ function selectionDetails(selection) {
   prefixRange.selectNodeContents(textEl);
   prefixRange.setEnd(range.startContainer, range.startOffset);
   const occurrence = countOccurrences(prefixRange.toString(), quote);
-  const quoteOffset = findOccurrence(state.chunk.text, quote, occurrence);
-  return {
-    quote,
-    quoteOffset: quoteOffset >= 0 ? quoteOffset : null,
-  };
+  const text = state.chunk.text;
+  if (!text.includes("[[img:")) {
+    const quoteOffset = findOccurrence(text, quote, occurrence);
+    return {
+      quote,
+      quoteOffset: quoteOffset >= 0 ? quoteOffset : null,
+    };
+  }
+  // Rendered images carry no text, so match against the text without tokens and map back:
+  // the saved quote keeps any image tokens it spans, and quoteOffset points into the chunk.
+  const { display, offsets } = displayText(text);
+  const displayOffset = findOccurrence(display, quote, occurrence);
+  if (displayOffset < 0) return { quote, quoteOffset: null };
+  const start = offsets[displayOffset];
+  const end = offsets[displayOffset + quote.length - 1] + 1;
+  return { quote: text.slice(start, end), quoteOffset: start };
 }
 
 async function loadBooks() {
@@ -501,6 +532,8 @@ async function selectBook(bookId) {
   $("continue-reading").disabled = false;
   document.body.classList.add("has-book");
   document.body.classList.remove("has-chunk");
+  state.replyTargetId = null;
+  setLocationHash();
   renderBooks();
   renderChunks();
   renderAnnotations();
@@ -516,6 +549,8 @@ function clearBookSelection() {
   state.activeAnnotationId = null;
   state.cardCandidates = [];
   state.replyDrafts = {};
+  state.replyTargetId = null;
+  setLocationHash();
   $("book-meta").textContent = "Choose a book";
   $("book-title").textContent = "Reading shelf";
   $("chunk-file").textContent = "No chapter selected";
@@ -544,7 +579,9 @@ async function deleteBookFromShelf(bookId) {
 async function selectChunk(chunkId) {
   state.chunkId = chunkId;
   state.activeAnnotationId = null;
+  state.replyTargetId = null;
   state.chunk = await api(`/api/books/${encodeURIComponent(state.bookId)}/chunks/${encodeURIComponent(chunkId)}`);
+  setLocationHash();
   state.lastFinish = null;
   $("chunk-file").textContent = state.chunk.chunk.id;
   $("chunk-title").textContent = state.chunk.chunk.title;
@@ -555,14 +592,31 @@ async function selectChunk(chunkId) {
   renderText();
   renderAnnotations();
   refreshCards();
+  $("text").scrollTop = 0;
   scrollToPanel(".reader");
+}
+
+// #/book/<bookId>/<chunkId> keeps the open book and chapter across reloads.
+function setLocationHash() {
+  const parts = ["#", "book", state.bookId, state.chunkId].filter(Boolean).map((part, index) => (index > 1 ? encodeURIComponent(part) : part));
+  const hash = state.bookId ? parts.join("/") : "";
+  if (location.hash !== hash) history.replaceState(null, "", `${location.pathname}${location.search}${hash}`);
+}
+
+async function restoreFromHash() {
+  const match = location.hash.match(/^#\/book\/([^/]+)(?:\/([^/]+))?/);
+  if (!match) return;
+  const [bookId, chunkId] = [match[1], match[2]].map((part) => (part ? decodeURIComponent(part) : null));
+  if (!state.books.some((book) => book.bookId === bookId)) return;
+  await selectBook(bookId);
+  if (chunkId && state.chunks.some((chunk) => chunk.id === chunkId)) await selectChunk(chunkId);
 }
 
 function openNoteForm(quote) {
   state.quote = quote.trim();
   state.quoteOffset = state.selectedQuote === state.quote ? state.selectedQuoteOffset : null;
   if (!state.bookId || !state.chunkId || !state.quote) return;
-  $("quote-preview").textContent = state.quote;
+  $("quote-preview").innerHTML = quoteHtml(state.quote);
   $("note").value = "";
   $("note-form").hidden = false;
   $("note").focus();
@@ -680,6 +734,52 @@ $("margins").addEventListener("click", (event) => {
   if (card) activateAnnotation(card.dataset.noteId);
 });
 
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-reply-to]");
+  if (!button) return;
+  const replyId = button.dataset.replyTo;
+  state.replyTargetId = state.replyTargetId === replyId ? null : replyId;
+  renderText();
+  renderAnnotations();
+  if (state.replyTargetId) {
+    document.querySelector(`.reply-form[data-parent-id="${CSS.escape(replyId)}"] textarea`)?.focus();
+  }
+});
+
+// Book images: figures at half their pixel width (EPUB art is usually 2x), tall inline images
+// (fractions) get more line height, and a missing file leaves a small marker instead.
+document.addEventListener(
+  "load",
+  (event) => {
+    const img = event.target;
+    if (!(img instanceof HTMLImageElement) || !img.matches(".book-figure, .book-inline")) return;
+    if (img.classList.contains("book-figure") && img.naturalWidth) img.style.width = `${Math.round(img.naturalWidth / 2)}px`;
+    if (img.classList.contains("book-inline") && img.naturalHeight > 90) img.classList.add("tall");
+  },
+  true,
+);
+document.addEventListener(
+  "error",
+  (event) => {
+    const img = event.target;
+    if (!(img instanceof HTMLImageElement) || !img.matches(".book-figure, .book-inline")) return;
+    const marker = document.createElement("span");
+    marker.className = "image-missing";
+    marker.textContent = "[image]";
+    img.replaceWith(marker);
+  },
+  true,
+);
+
+document.addEventListener("keydown", (event) => {
+  if (!state.chunk || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  if (event.target.closest?.("textarea, input, select, [contenteditable]")) return;
+  const targetId = event.key === "ArrowLeft" ? state.chunk.prevId : event.key === "ArrowRight" ? state.chunk.nextId : null;
+  if (!targetId) return;
+  event.preventDefault();
+  selectChunk(targetId).catch(showError);
+});
+
 document.addEventListener("submit", async (event) => {
   const form = event.target.closest(".reply-form");
   if (!form) return;
@@ -700,6 +800,7 @@ document.addEventListener("submit", async (event) => {
   });
   textarea.value = "";
   delete state.replyDrafts[form.dataset.parentId];
+  state.replyTargetId = null;
   state.activeAnnotationId = savedNoteId;
   await refreshCurrent({ force: true });
   if (savedNoteId) activateAnnotation(savedNoteId);
@@ -792,6 +893,7 @@ $("import-file").addEventListener("change", async (event) => {
         body: {
           filename: file.name,
           dataBase64: await fileToBase64(file),
+          keepImages: $("import-keep-images").checked,
         },
       });
       imported.push(manifest);
@@ -816,7 +918,9 @@ function showError(error) {
   showToast(msg);
 }
 
-loadBooks().catch(showError);
+loadBooks()
+  .then(restoreFromHash)
+  .catch(showError);
 setInterval(() => {
   if (document.hidden) return;
   refreshCurrent().catch(showError);

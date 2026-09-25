@@ -1,11 +1,15 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { cardArtSvg } from "../public/card-art.js";
+import { compactText } from "../public/card-logic.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const execFileAsync = promisify(execFile);
 
 function escapeXml(value = "") {
   return String(value)
@@ -19,12 +23,6 @@ function escapeHtml(value = "") {
   return escapeXml(value).replace(/'/g, "&#39;");
 }
 
-function compactText(value = "", max = 160) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1)).trim()}…`;
-}
-
 function safeFilePart(value = "reading-card") {
   const text = String(value || "reading-card")
     .trim()
@@ -34,25 +32,6 @@ function safeFilePart(value = "reading-card") {
     .slice(0, 80)
     .replace(/^-|-$/g, "");
   return text || "reading-card";
-}
-
-function hashText(value) {
-  let hash = 2166136261;
-  for (const char of String(value || "")) {
-    hash ^= char.codePointAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
-}
-
-function seededRandom(seed) {
-  let value = (Number(seed) || 1) >>> 0;
-  return () => {
-    value ^= value << 13;
-    value ^= value >>> 17;
-    value ^= value << 5;
-    return (value >>> 0) / 4294967296;
-  };
 }
 
 function wrapText(text, maxChars, maxLines) {
@@ -70,70 +49,6 @@ function wrapText(text, maxChars, maxLines) {
   }
   if (line) lines.push(line);
   return lines.slice(0, maxLines);
-}
-
-function artSvg(card, width, height) {
-  const random = seededRandom(card.artSeed || hashText(`${card.id}:${card.quote}:${card.note}`));
-  if (card.art === "lastfold" || (card.scope || card.context?.scope) === "book") {
-    const density = Array.isArray(card.context?.density) ? card.context.density.map((value) => Number(value) || 0) : [];
-    const max = Math.max(...density, 1);
-    const points = density.length ? density : Array.from({ length: 18 }, () => Math.floor(random() * 3));
-    const left = width * 0.15;
-    const right = width * 0.86;
-    const base = height * 0.34;
-    const amplitude = height * 0.09;
-    const pathLine = points.map((value, index) => {
-      const x = left + (right - left) * (points.length <= 1 ? 0 : index / (points.length - 1));
-      const y = base - (value / max) * amplitude + (random() - 0.5) * 5;
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
-    }).join(" ");
-    const spineX = width * (0.82 + random() * 0.05);
-    const spine = `<path d="M ${spineX.toFixed(1)} 34 C ${(spineX - 8).toFixed(1)} ${(height * 0.36).toFixed(1)} ${(spineX + 7).toFixed(1)} ${(height * 0.7).toFixed(1)} ${spineX.toFixed(1)} ${(height - 34).toFixed(1)}" fill="none" stroke="#514a42" stroke-width="0.8" opacity="0.11"/>`;
-    const quietLines = Array.from({ length: 8 }, () => {
-      const x = 44 + random() * (width - 88);
-      return `<path d="M ${x.toFixed(1)} 40 L ${(x + (random() - 0.5) * 16).toFixed(1)} ${(height - 46).toFixed(1)}" fill="none" stroke="#514a42" stroke-width="0.55" opacity="${(0.035 + random() * 0.07).toFixed(3)}"/>`;
-    }).join("");
-    const wave = `<path d="${pathLine}" fill="none" stroke="#6e665d" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" opacity="0.24"/>`;
-    return `${quietLines}${spine}<line x1="${(width * 0.13).toFixed(1)}" y1="${(height * 0.52).toFixed(1)}" x2="${(width * 0.87).toFixed(1)}" y2="${(height * 0.52).toFixed(1)}" stroke="#2b2722" stroke-width="0.7" opacity="0.10"/>${wave}`;
-  }
-  if (card.art === "ripple") {
-    const centers = [
-      [width * (0.24 + random() * 0.1), height * (0.2 + random() * 0.08)],
-      [width * (0.56 + random() * 0.12), height * (0.42 + random() * 0.12)],
-      [width * (0.2 + random() * 0.08), height * (0.68 + random() * 0.08)],
-    ];
-    return centers
-      .flatMap(([cx, cy], groupIndex) =>
-        Array.from({ length: groupIndex === 1 ? 4 : 3 }, (_, index) => {
-          const radius = 34 + index * (30 + random() * 16) + random() * 10;
-          const opacity = 0.035 + random() * 0.055;
-          return `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${radius.toFixed(1)}" fill="none" stroke="#665648" stroke-width="1.2" opacity="${opacity.toFixed(3)}"/>`;
-        }),
-      )
-      .join("");
-  }
-  if (card.art === "stardust") {
-    const dots = Array.from({ length: 72 }, () => {
-      const cx = 28 + random() * (width - 56);
-      const cy = 38 + random() * (height - 90);
-      const radius = 0.35 + random() * 0.95;
-      const opacity = 0.16 + random() * 0.38;
-      return `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${radius.toFixed(2)}" fill="#584e40" opacity="${opacity.toFixed(3)}"/>`;
-    }).join("");
-    const crosses = Array.from({ length: 7 }, () => {
-      const cx = 48 + random() * (width - 96);
-      const cy = 58 + random() * (height - 116);
-      const opacity = 0.18 + random() * 0.22;
-      return `<path d="M ${(cx - 3).toFixed(1)} ${cy.toFixed(1)} L ${(cx + 3).toFixed(1)} ${cy.toFixed(1)} M ${cx.toFixed(1)} ${(cy - 3).toFixed(1)} L ${cx.toFixed(1)} ${(cy + 3).toFixed(1)}" stroke="#584e40" stroke-width="0.7" opacity="${opacity.toFixed(3)}"/>`;
-    }).join("");
-    return `${dots}${crosses}`;
-  }
-  return Array.from({ length: 16 }, () => {
-    const x = 34 + random() * (width - 68);
-    const drift = (random() - 0.5) * 34;
-    const opacity = 0.045 + random() * 0.1;
-    return `<path d="M ${x.toFixed(1)} 18 C ${(x + drift).toFixed(1)} ${(height * 0.32).toFixed(1)} ${(x - drift).toFixed(1)} ${(height * 0.68).toFixed(1)} ${x.toFixed(1)} ${(height - 18).toFixed(1)}" fill="none" stroke="#4c453d" stroke-width="0.9" opacity="${opacity.toFixed(3)}"/>`;
-  }).join("");
 }
 
 function cardArtLabel(card = {}) {
@@ -241,7 +156,7 @@ export function renderCardSvg(card = {}) {
   <rect width="100%" height="100%" fill="transparent"/>
   <rect x="24" y="24" width="${width - 48}" height="${height - 48}" rx="48" fill="url(#paper)" filter="url(#shadow)"/>
   <rect x="24.5" y="24.5" width="${width - 49}" height="${height - 49}" rx="47.5" fill="none" stroke="#ffffff" stroke-opacity="0.8"/>
-  <g>${artSvg(card, width, height)}</g>
+  <g color="#584e40">${cardArtSvg(card, width, height)}</g>
   <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', sans-serif" fill="#28241f">
     <text x="76" y="92" font-size="20" font-weight="800" letter-spacing="2" fill="#9d968d">${escapeXml(compactText(card.sourceLabel || cardArtLabel(card), 26).toUpperCase())}</text>
     <text x="76" y="146" font-size="22" font-weight="800" fill="#777168">${escapeXml(card.kicker || "收获了一枚回声书签")}</text>
@@ -264,7 +179,7 @@ export function renderCardHtml(card = {}) {
   const cardWidth = 360;
   const frameWidth = 396;
   const artHeight = 760;
-  const art = artSvg(card, cardWidth, artHeight);
+  const art = cardArtSvg(card, cardWidth, artHeight);
   const kind = cardArtClass(card);
   const palette = cardPalette(card);
   const totalLength = [card.quote, card.note].filter(Boolean).join("").length;
@@ -350,7 +265,7 @@ export function renderCardHtml(card = {}) {
   .foot { margin: 0; color: #817b72; font-size: 13px; }
 </style>
 <article class="card ${escapeHtml(kind)} ${escapeHtml(sizeClass)}">
-  <div class="art"><svg viewBox="0 0 ${cardWidth} ${artHeight}" preserveAspectRatio="none">${art}</svg></div>
+  <div class="art"><svg viewBox="0 0 ${cardWidth} ${artHeight}" preserveAspectRatio="none" color="#584e40">${art}</svg></div>
   <div class="content">
     <p class="name">${escapeHtml(cardArtLabel(card))}</p>
     <p class="kicker">${escapeHtml(card.kicker || "收获了一枚回声书签")}</p>
@@ -364,58 +279,73 @@ export function renderCardHtml(card = {}) {
 </article>`;
 }
 
-function executableWorks(command) {
-  if (!command) return false;
-  const result = spawnSync(command, ["--version"], { stdio: "ignore" });
-  return result.status === 0;
-}
+// Cache the CLI lookup: probing runs `playwright --version`, which is slow. A miss is
+// re-checked after a few minutes so installing Playwright doesn't need a restart.
+const PLAYWRIGHT_MISS_TTL_MS = 5 * 60 * 1000;
+let playwrightLookup = null;
 
-function playwrightCommand() {
+async function findPlaywright() {
   const candidates = [
     process.env.PLAYWRIGHT_CLI,
     path.join(ROOT, "node_modules", ".bin", "playwright"),
-    "/opt/homebrew/bin/playwright",
     "playwright",
+    // Apps like Claude Desktop start MCP servers with a minimal PATH; try Homebrew's prefixes too.
+    "/opt/homebrew/bin/playwright",
+    "/usr/local/bin/playwright",
   ].filter(Boolean);
-  return candidates.find(executableWorks);
+  for (const command of candidates) {
+    try {
+      await execFileAsync(command, ["--version"], { timeout: 15_000 });
+      return command;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return null;
 }
 
-export function renderCardPng(card = {}) {
-  const bin = playwrightCommand();
+function playwrightCommand() {
+  if (!playwrightLookup || (playwrightLookup.command === null && Date.now() - playwrightLookup.at > PLAYWRIGHT_MISS_TTL_MS)) {
+    const at = Date.now();
+    playwrightLookup = { at, command: undefined, promise: findPlaywright() };
+    playwrightLookup.promise.then((command) => {
+      if (playwrightLookup?.at === at) playwrightLookup.command = command;
+    });
+  }
+  return playwrightLookup.promise;
+}
+
+/** Render a card to PNG with the Playwright CLI without blocking the server's event loop. */
+export async function renderCardPng(card = {}) {
+  const bin = await playwrightCommand();
   if (!bin) throw new Error("Playwright CLI not found; install it to enable PNG card rendering.");
   const token = randomBytes(8).toString("hex");
   const htmlPath = path.join(tmpdir(), `co-reading-card-${token}.html`);
   const pngPath = path.join(tmpdir(), `co-reading-card-${token}.png`);
-  writeFileSync(htmlPath, renderCardHtml(card));
-  const result = spawnSync(
-    bin,
-    [
-      "screenshot",
-      "--browser",
-      "chromium",
-      "--full-page",
-      "--viewport-size",
-      "396,1",
-      `file://${htmlPath}`,
-      pngPath,
-    ],
-    { encoding: "utf8" },
-  );
-  if (result.status !== 0 || !existsSync(pngPath)) {
-    throw new Error(result.stderr || result.stdout || `Playwright exited with ${result.status}`);
+  try {
+    await writeFile(htmlPath, renderCardHtml(card));
+    try {
+      await execFileAsync(
+        bin,
+        ["screenshot", "--browser", "chromium", "--full-page", "--viewport-size", "396,1", `file://${htmlPath}`, pngPath],
+        { timeout: 60_000 },
+      );
+    } catch (error) {
+      throw new Error(error.stderr || error.stdout || error.message);
+    }
+    return await readFile(pngPath);
+  } finally {
+    await rm(htmlPath, { force: true });
+    await rm(pngPath, { force: true });
   }
-  const png = readFileSync(pngPath);
-  try { unlinkSync(htmlPath); } catch {}
-  try { unlinkSync(pngPath); } catch {}
-  return png;
 }
 
-export function renderCardImageContent(card) {
+export async function renderCardImageContent(card) {
   try {
     return {
       type: "image",
       mimeType: "image/png",
-      data: renderCardPng(card).toString("base64"),
+      data: (await renderCardPng(card)).toString("base64"),
     };
   } catch {
     // Keep the zero-dependency server usable even when PNG rendering is not installed.
@@ -427,19 +357,19 @@ export function renderCardImageContent(card) {
   };
 }
 
-export function saveCardImage(card = {}, outputDir) {
+export async function saveCardImage(card = {}, outputDir) {
   if (!outputDir) throw new Error("outputDir is required");
-  mkdirSync(outputDir, { recursive: true });
+  await mkdir(outputDir, { recursive: true });
   const title = safeFilePart(card.title || card.bookTitle || card.id || "reading-card");
   const id = safeFilePart(card.id || randomBytes(4).toString("hex"));
   const basePath = path.join(outputDir, `${title}-${id}`);
   try {
     const pngPath = `${basePath}.png`;
-    writeFileSync(pngPath, renderCardPng(card));
+    await writeFile(pngPath, await renderCardPng(card));
     return { path: pngPath, mimeType: "image/png" };
   } catch {
     const svgPath = `${basePath}.svg`;
-    writeFileSync(svgPath, renderCardSvg(card));
+    await writeFile(svgPath, renderCardSvg(card));
     return { path: svgPath, mimeType: "image/svg+xml" };
   }
 }

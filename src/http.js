@@ -12,7 +12,8 @@ export function startHttpServer() {
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url || "/", `http://${req.headers.host || `${host}:${port}`}`);
-      if (url.pathname.startsWith("/api/")) {
+      // Also check the raw path: URL parsing folds "/api/books/x/asset/../.." out of /api/.
+      if (url.pathname.startsWith("/api/") || String(req.url || "").startsWith("/api/")) {
         await handleApi(req, res, url);
       } else {
         await serveStatic(req, res, url);

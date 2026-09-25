@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -113,6 +113,93 @@ if (!singleItemManifest.chunks.some((chunk) => chunk.sectionTitle === "Inner Cha
 }
 if (!singleItemManifest.chunks.some((chunk) => chunk.sectionTitle === "Inner Chapter Two")) {
   throw new Error("single-spine EPUB import did not split second internal heading");
+}
+const imageEpub = path.join(tempDataDir, "image-demo.epub");
+execFileSync(
+  "python3",
+  ["-", imageEpub],
+  {
+    input: `
+import sys, zipfile
+epub = sys.argv[1]
+png = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
+with zipfile.ZipFile(epub, "w") as zf:
+    zf.writestr("mimetype", "application/epub+zip")
+    zf.writestr("META-INF/container.xml", """<?xml version='1.0'?>
+<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'>
+  <rootfiles><rootfile full-path='OEBPS/content.opf' media-type='application/oebps-package+xml'/></rootfiles>
+</container>""")
+    zf.writestr("OEBPS/content.opf", """<?xml version='1.0'?>
+<package xmlns='http://www.idpf.org/2007/opf' version='3.0'>
+  <metadata xmlns:dc='http://purl.org/dc/elements/1.1/'><dc:title>Image Demo</dc:title></metadata>
+  <manifest>
+    <item id='cover' href='Text/cover.xhtml' media-type='application/xhtml+xml'/>
+    <item id='c1' href='Text/c1.xhtml' media-type='application/xhtml+xml'/>
+    <item id='c2' href='Text/c2.xhtml' media-type='application/xhtml+xml'/>
+  </manifest>
+  <spine><itemref idref='cover'/><itemref idref='c1'/><itemref idref='c2'/></spine>
+</package>""")
+    zf.writestr("OEBPS/Text/cover.xhtml", "<html><body><div><img src='../Images/cover.jpg'/></div></body></html>")
+    zf.writestr("OEBPS/Text/c1.xhtml", """<html><body><h1>Motion</h1>
+      <p>It can be written as:</p><div class='equation_img'><img src='../Images/eq%201.png'/></div>
+      <p>where <img src='../Images/f.png'/> is the force and t<sup>2</sup> meets l<sub>1</sub>.</p></body></html>""")
+    zf.writestr("OEBPS/Text/c2.xhtml", "<html><body><h1>Energy</h1>" + "".join(
+        f"<p>Paragraph {i} about energy, long enough to split this section into parts.</p>"
+        + (f"<div><img src='../Images/e{i}.png'/></div>" if i % 2 else "") for i in range(8)) + "</body></html>")
+    for name in ["cover.jpg", "eq 1.png", "f.png"] + [f"e{i}.png" for i in range(1, 8, 2)]:
+        zf.writestr("OEBPS/Images/" + name, png)
+`,
+    encoding: "utf8",
+  },
+);
+for (const [bookId, extra] of [["image-demo-text", []], ["image-demo", ["--keep-images"]]]) {
+  execFileSync("python3", [
+    path.join(root, "scripts/import_epub.py"),
+    imageEpub,
+    "--out",
+    path.join(tempDataDir, "books"),
+    "--book-id",
+    bookId,
+    "--max-chars",
+    "200",
+    ...extra,
+  ], { stdio: ["ignore", "ignore", "ignore"] });
+}
+const imageTextManifest = JSON.parse(
+  await readFile(path.join(tempDataDir, "books", "image-demo-text", "manifest.json"), "utf8"),
+);
+const imageManifest = JSON.parse(await readFile(path.join(tempDataDir, "books", "image-demo", "manifest.json"), "utf8"));
+const chunkShape = (manifest) => manifest.chunks.map(({ id, title, sectionTitle, sourcePath }) => ({ id, title, sectionTitle, sourcePath }));
+if (JSON.stringify(chunkShape(imageTextManifest)) !== JSON.stringify(chunkShape(imageManifest))) {
+  throw new Error("--keep-images changed chunk ids, titles, or section boundaries");
+}
+if (imageManifest.chunks.length < 3 || !imageManifest.chunks.some((chunk) => chunk.sectionPartCount > 1)) {
+  throw new Error("image EPUB smoke fixture did not exercise a split section");
+}
+const imageChunkTexts = await Promise.all(
+  imageManifest.chunks.map((chunk) => readFile(path.join(tempDataDir, "books", "image-demo", chunk.path), "utf8")),
+);
+const imageTokens = imageChunkTexts.join("\n").match(/\[\[img:assets\/[^\]]+\]\]/g) || [];
+if (imageTokens.length !== 7) {
+  throw new Error(`--keep-images wrote ${imageTokens.length} image tokens, expected 7`);
+}
+if (!imageChunkTexts[0].includes("Motion\n\n[[img:assets/cover.jpg]]")) {
+  throw new Error("--keep-images did not fold the image-only cover page into the next section");
+}
+if (!imageChunkTexts[0].includes("written as:\n\n[[img:assets/eq-1.png]]\n\nwhere [[img:assets/f.png]] is the force")) {
+  throw new Error("--keep-images did not keep block and inline image positions");
+}
+if (!imageChunkTexts[0].includes("t² meets l₁")) {
+  throw new Error("--keep-images did not convert sup/sub to Unicode");
+}
+for (const token of imageTokens) {
+  await readFile(path.join(tempDataDir, "books", "image-demo", token.slice(6, -2)));
+}
+const imageTextChunkTexts = await Promise.all(
+  imageTextManifest.chunks.map((chunk) => readFile(path.join(tempDataDir, "books", "image-demo-text", chunk.path), "utf8")),
+);
+if (imageTextChunkTexts.some((text) => text.includes("[[img:"))) {
+  throw new Error("EPUB import without --keep-images wrote image tokens");
 }
 const tempTxt = path.join(tempDataDir, "heading-demo.txt");
 await writeFile(
@@ -397,6 +484,10 @@ const hiddenBeforeSubmit = await request("tools/call", {
   name: "reading_list_annotations",
   arguments: { parentId: null, author: "user" },
 });
+const hiddenBeforeSubmitAlias = await request("tools/call", {
+  name: "reading_list_annotations",
+  arguments: { parentId: null, author: "Koshi" },
+});
 const firstSubmit = await request("tools/call", {
   name: "reading_submit_user_notes",
   arguments: { bookId: "anthropic-guidelines", sessionId: "session-a" },
@@ -404,6 +495,14 @@ const firstSubmit = await request("tools/call", {
 const visibleAfterSubmit = await request("tools/call", {
   name: "reading_list_annotations",
   arguments: { parentId: null, author: "user", status: "submitted" },
+});
+const visibleAfterSubmitAlias = await request("tools/call", {
+  name: "reading_list_annotations",
+  arguments: { parentId: null, author: "KOSHI", status: "submitted" },
+});
+const claudeAuthorAlias = await request("tools/call", {
+  name: "reading_list_annotations",
+  arguments: { bookId: "anthropic-guidelines", author: "Claude" },
 });
 const mcpSpoofNote = await request("tools/call", {
   name: "reading_annotate_passage",
@@ -630,6 +729,80 @@ const httpDeletedProgress = await fetchJson("/api/progress?bookId=http-import");
 const httpDeletedAnnotations = await fetchJson("/api/annotations?bookId=http-import");
 const httpDeletedCards = await fetchJson("/api/cards?bookId=http-import");
 const readerHtml = await fetch(`http://127.0.0.1:${httpPort}/`);
+
+function rawRequest(port, method, rawPath, headers = {}) {
+  // http.request keeps the path as written, unlike fetch(), so traversal attempts reach the server.
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: "127.0.0.1", port, method, path: rawPath, headers }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+const httpImageImport = await fetchJson("/api/import", {
+  method: "POST",
+  body: {
+    filename: "image-demo.epub",
+    dataBase64: (await readFile(imageEpub)).toString("base64"),
+    bookId: "http-image-demo",
+    maxChars: 200,
+    keepImages: true,
+  },
+});
+const httpImageChunk = await fetchJson("/api/books/http-image-demo/chunks/ch00");
+if (!httpImageImport.keepImages || !httpImageChunk.text.includes("[[img:assets/eq-1.png]]")) {
+  throw new Error("HTTP import did not pass keepImages through to the EPUB importer");
+}
+const assetPath = "/api/books/http-image-demo/asset/assets/eq-1.png";
+const assetGet = await rawRequest(httpPort, "GET", assetPath);
+const assetHead = await rawRequest(httpPort, "HEAD", assetPath);
+const assetCached = await rawRequest(httpPort, "GET", assetPath, { "if-none-match": assetGet.headers.etag });
+const assetMissing = await rawRequest(httpPort, "GET", "/api/books/http-image-demo/asset/assets/nope.png");
+const assetUnknownBook = await rawRequest(httpPort, "GET", "/api/books/no-such-book/asset/assets/eq-1.png");
+const assetOutsideAssets = await rawRequest(httpPort, "GET", "/api/books/http-image-demo/asset/manifest.json");
+const assetTraversals = await Promise.all(
+  [
+    "/api/books/http-image-demo/asset/../manifest.json",
+    "/api/books/http-image-demo/asset/assets/../../../progress.json",
+    "/api/books/http-image-demo/asset/assets/%2e%2e/manifest.json",
+    "/api/books/http-image-demo/asset/assets%2F..%2Fmanifest.json",
+    "/api/books/..%2Fhttp-image-demo/asset/assets/eq-1.png",
+  ].map((rawPath) => rawRequest(httpPort, "GET", rawPath)),
+);
+await symlink(
+  path.join(tempDataDir, "progress.json"),
+  path.join(tempDataDir, "books", "http-image-demo", "assets", "escape.png"),
+);
+const assetSymlinkEscape = await rawRequest(httpPort, "GET", "/api/books/http-image-demo/asset/assets/escape.png");
+if (
+  assetGet.status !== 200 ||
+  assetGet.headers["content-type"] !== "image/png" ||
+  assetGet.headers["cache-control"] !== "private, max-age=604800" ||
+  assetGet.headers["x-content-type-options"] !== "nosniff" ||
+  !assetGet.headers.etag ||
+  !assetGet.body.subarray(1, 4).equals(Buffer.from("PNG"))
+) {
+  throw new Error(`Asset route did not serve the image correctly (${assetGet.status})`);
+}
+if (assetHead.status !== 200 || assetHead.body.length !== 0 || assetHead.headers["content-length"] !== String(assetGet.body.length)) {
+  throw new Error("Asset route did not answer HEAD");
+}
+if (assetCached.status !== 304 || assetCached.body.length !== 0) {
+  throw new Error(`Asset route did not answer If-None-Match with 304 (${assetCached.status})`);
+}
+if (assetMissing.status !== 404 || assetUnknownBook.status !== 404 || assetOutsideAssets.status !== 404) {
+  throw new Error("Asset route did not 404 missing files, unknown books, or files outside assets/");
+}
+if (assetTraversals.some((response) => response.status !== 400)) {
+  throw new Error(`Asset route did not refuse traversal: ${assetTraversals.map((response) => response.status).join(",")}`);
+}
+if (assetSymlinkEscape.status !== 403) {
+  throw new Error(`Asset route followed a symlink out of assets/ (${assetSymlinkEscape.status})`);
+}
 httpServer.kill();
 const ssePort = httpPort + 1;
 const sseServer = spawn(process.execPath, [path.join(root, "src/server-sse.js")], {
@@ -719,6 +892,16 @@ const sseApiBooks = await fetchJson("/api/books", {
   baseUrl: `http://127.0.0.1:${ssePort}`,
   headers: { Authorization: "Bearer smoke-token" },
 });
+const sseAssetNoAuth = await rawRequest(ssePort, "GET", assetPath);
+const sseAssetWrongToken = await rawRequest(ssePort, "GET", assetPath, { authorization: "Bearer wrong-token" });
+const sseAssetBearer = await rawRequest(ssePort, "GET", assetPath, { authorization: "Bearer smoke-token" });
+const sseAssetCookie = await rawRequest(ssePort, "GET", assetPath, { cookie: sseCookie.split(";")[0] });
+if (sseAssetNoAuth.status !== 401 || sseAssetWrongToken.status !== 401) {
+  throw new Error("SSE process served a book asset without MCP_AUTH_TOKEN");
+}
+if (sseAssetBearer.status !== 200 || sseAssetCookie.status !== 200) {
+  throw new Error("SSE process did not serve a book asset with bearer or reader cookie auth");
+}
 const sseMcpGet = await fetch(`http://127.0.0.1:${ssePort}/mcp`, {
   headers: { Authorization: "Bearer smoke-token" },
 });
@@ -814,8 +997,17 @@ if (contentJson(dismissedCard).status !== "dismissed" || contentJson(dismissedIn
 if (!badImportBookId.error?.message.includes("bookId may only contain")) {
   throw new Error("reading_import_book did not reject unsafe bookId");
 }
-if (contentJson(hiddenBeforeSubmit).length !== 0) {
+if (contentJson(hiddenBeforeSubmit).length !== 0 || contentJson(hiddenBeforeSubmitAlias).length !== 0) {
   throw new Error("reading_list_annotations exposed open human notes before submit");
+}
+if (
+  JSON.stringify(contentJson(visibleAfterSubmitAlias).map((note) => note.id)) !==
+  JSON.stringify(contentJson(visibleAfterSubmit).map((note) => note.id))
+) {
+  throw new Error("reading_list_annotations author filter did not treat koshi/user as the same reader");
+}
+if (!contentJson(claudeAuthorAlias).length || contentJson(claudeAuthorAlias).some((note) => note.author !== "claude")) {
+  throw new Error("reading_list_annotations author filter did not match Claude case-insensitively");
 }
 if (contentJson(firstSubmit).count !== 1) {
   throw new Error("reading_submit_user_notes did not submit the open user note");

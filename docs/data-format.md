@@ -31,6 +31,21 @@ Each imported book lives under `data/books/<book-id>/manifest.json`.
 
 `path` is relative to the book directory.
 
+### Images
+
+EPUBs imported with `--keep-images` (or `keepImages: true`) also get an `assets/` folder:
+
+```text
+data/books/<book-id>/
+  manifest.json
+  chunks/ch00.txt ...
+  assets/Figure-P90_47975.jpg ...
+```
+
+The chunk text refers to them with `[[img:assets/<file>]]`. A token that fills a whole paragraph is a figure or display formula; a token inside a sentence is an inline image. `charCount` includes the tokens; `wordCount` ignores them. Books imported without images have no `assets/` folder and no tokens.
+
+Every folder under `data/books/` that contains a `manifest.json` is treated as a book, so keep manual backups of a book folder outside `data/books/`.
+
 ## Annotations
 
 Annotations are stored as JSONL in `data/annotations.jsonl`.
@@ -142,7 +157,7 @@ The server keeps lightweight in-process caches:
 - chunk text is cached by file signature for repeated reads/searches
 - annotation counts are cached by `annotations.jsonl` signature
 
-Writes that change annotations clear the annotation cache immediately. Writes to annotations, progress, and session context are serialized through an in-process queue to avoid read-modify-write overlap in multi-client use. Restarting the server clears all caches.
+Writes that change annotations clear the annotation cache immediately. Writes to annotations, progress, cards, submissions, and session context are serialized through an in-process queue plus a `data/.write-lock` directory, so two processes on the same data dir (for example `src/server.js` for Claude and `src/http.js` for the reader) can't overwrite each other's changes. A lock left behind by a killed process expires after 60 seconds. JSON files are replaced atomically (temp file + rename). Restarting the server clears all caches.
 
 ## Trash
 

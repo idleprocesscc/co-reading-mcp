@@ -126,6 +126,8 @@ EPUB:
 python3 scripts/import_epub.py ./book.epub --out ./data/books
 ```
 
+Add `--keep-images` to keep pictures and formula images (useful for textbooks). Images are copied to `data/books/<book-id>/assets/`, the text gets `[[img:assets/<file>]]` placeholders, and `<sup>`/`<sub>` become Unicode (`t²`, `x₀`). Chunk ids and titles stay the same as a text-only import, so re-importing an existing book with images keeps its progress and notes attached to the same chunks (an older note whose quote crossed an image or a superscript keeps its margin card but may lose its in-text highlight). The bundled reader renders the placeholders as images; MCP clients see them as plain text.
+
 Claude can also import books through MCP, which is useful on claude.ai or mobile devices where the user cannot SSH into the server:
 
 - `reading_import_book`: one EPUB/TXT as a base64 payload
@@ -164,6 +166,8 @@ data/books/<book-id>/
     ch01.txt
 ```
 
+Keep manual backups of a book folder outside `data/books`: every folder there with a `manifest.json` is listed as a book.
+
 EPUB imports keep each spine item as a section boundary. If an EPUB stores the whole book in a single spine item, the importer falls back to internal `h1`/`h2`/`h3` headings. If a chapter is longer than `--max-chars`, only that chapter is split into `Chapter Title Part 1/N`, `Part 2/N`, and so on.
 
 Runtime state is stored outside book content:
@@ -198,6 +202,7 @@ data/
 - `reading_reply_to_annotation`
 - `reading_mark_read`
 - `reading_card_inbox`
+- `reading_card_collection`
 - `reading_open_card`
 - `reading_save_card`
 - `reading_dismiss_card`
@@ -216,6 +221,7 @@ The bundled reader is intentionally small: it is a reference UI, not a required 
 - `DELETE /api/books/:bookId`
 - `GET /api/books/:bookId/chunks`
 - `GET /api/books/:bookId/chunks/:chunkId`
+- `GET|HEAD /api/books/:bookId/asset/assets/<file>` (images kept by `--keep-images`)
 - `GET /api/continue?bookId=...`
 - `GET /api/annotations?bookId=...&chunkId=...`
 - `POST /api/annotations`
@@ -224,6 +230,8 @@ The bundled reader is intentionally small: it is a reference UI, not a required 
 - `POST /api/mark-read`
 - `GET /api/search?q=...&bookId=...`
 - `POST /api/import`
+
+A chunk token `[[img:assets/<file>]]` maps to `/api/books/<encodeURIComponent(bookId)>/asset/assets/<file>`. The route uses the same auth as the rest of `/api/*` (bearer header or the reader cookie), only serves files inside the book's `assets/` folder, refuses `..`, encoded slashes, and symlinks that leave the folder, and sends `Cache-Control: private, max-age=604800` with an `ETag` (`If-None-Match` gets a 304).
 
 Human notes are saved as open local notes first. Pressing "Send to Claude" calls `reading_submit_user_notes`, includes chunk context according to the session policy, marks those notes submitted, and avoids resending the same open notes.
 
