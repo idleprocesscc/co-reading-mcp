@@ -126,6 +126,8 @@ EPUB:
 python3 scripts/import_epub.py ./book.epub --out ./data/books
 ```
 
+Add `--keep-images` to keep pictures and formula images (useful for textbooks). Images are copied to `data/books/<book-id>/assets/`, the text gets `[[img:assets/<file>]]` placeholders, and `<sup>`/`<sub>` become Unicode (`t²`, `x₀`). Chunk ids and titles stay the same as a text-only import, so re-importing an existing book with images keeps its progress and notes lined up. The bundled reader renders the placeholders as images; MCP clients see them as plain text.
+
 Claude can also import books through MCP, which is useful on claude.ai or mobile devices where the user cannot SSH into the server:
 
 - `reading_import_book`: one EPUB/TXT as a base64 payload
@@ -163,6 +165,8 @@ data/books/<book-id>/
     ch00.txt
     ch01.txt
 ```
+
+Keep manual backups of a book folder outside `data/books`: every folder there with a `manifest.json` is listed as a book.
 
 EPUB imports keep each spine item as a section boundary. If an EPUB stores the whole book in a single spine item, the importer falls back to internal `h1`/`h2`/`h3` headings. If a chapter is longer than `--max-chars`, only that chapter is split into `Chapter Title Part 1/N`, `Part 2/N`, and so on.
 

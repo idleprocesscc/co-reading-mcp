@@ -137,6 +137,7 @@ function commonOptions(input = {}) {
     headingRegex: validateHeadingRegex(input.headingRegex),
     minSectionChars: positiveInteger(input.minSectionChars, "minSectionChars"),
     overwrite: input.overwrite === true,
+    keepImages: input.keepImages === true,
   };
 }
 
@@ -165,6 +166,7 @@ function importerArgs(filePath, options) {
   if (options.author) args.push("--author", options.author);
   if (options.bookId) args.push("--book-id", options.bookId);
   if (options.maxChars) args.push("--max-chars", String(options.maxChars));
+  if (options.format === "epub" && options.keepImages) args.push("--keep-images");
   if (options.format === "txt" && options.headingRegex) {
     args.push("--heading-regex", options.headingRegex);
     if (options.minSectionChars) args.push("--min-section-chars", String(options.minSectionChars));
@@ -220,6 +222,7 @@ async function runImport(filePath, options) {
     firstChunkId: firstChunk?.id || null,
     lastChunkId: lastChunk?.id || null,
     source: manifest.source || null,
+    keepImages: options.format === "epub" && options.keepImages,
     message: `Imported ${manifest.title} (${manifest.chunks?.length || 0} chunks).`,
   };
 }

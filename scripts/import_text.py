@@ -6,9 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# Image placeholder left in chunk text by `import_epub.py --keep-images`.
+IMG_TOKEN_RE = re.compile(r"\[\[img:[^\]\n]+\]\]")
 
 
 def slugify(value: str) -> str:
@@ -32,14 +36,16 @@ def is_semantic_break(prev: str, current: str) -> bool:
     return prev.endswith(("。", "。\"", "。』", "。）", ".", ".\"", "?\"", "？\"", "！\""))
 
 
-def split_text(text: str, max_chars: int) -> list[str]:
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    if not paragraphs:
-        return [text.strip()]
-    if sum(len(p) + 2 for p in paragraphs) <= max_chars:
-        return ["\n\n".join(paragraphs)]
+def split_paragraphs(text: str) -> list[str]:
+    return [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
 
-    chunks: list[str] = []
+
+def split_ranges(paragraphs: list[str], max_chars: int) -> list[tuple[int, int]]:
+    """Pick chunk boundaries as [start, end) paragraph index ranges."""
+    if sum(len(p) + 2 for p in paragraphs) <= max_chars:
+        return [(0, len(paragraphs))]
+
+    ranges: list[tuple[int, int]] = []
     start = 0
 
     while start < len(paragraphs):
@@ -54,7 +60,7 @@ def split_text(text: str, max_chars: int) -> list[str]:
             end += 1
 
         if end >= len(paragraphs):
-            chunks.append("\n\n".join(paragraphs[start:]))
+            ranges.append((start, len(paragraphs)))
             break
 
         search_start = max(start + 1, end - 5)
@@ -65,10 +71,57 @@ def split_text(text: str, max_chars: int) -> list[str]:
                 best_cut = index
                 break
 
-        chunks.append("\n\n".join(paragraphs[start:best_cut]))
+        ranges.append((start, best_cut))
         start = best_cut
 
+    return ranges
+
+
+def split_text(text: str, max_chars: int) -> list[str]:
+    paragraphs = split_paragraphs(text)
+    if not paragraphs:
+        return [text.strip()]
+    chunks = ["\n\n".join(paragraphs[start:end]) for start, end in split_ranges(paragraphs, max_chars)]
     return chunks or [text.strip()]
+
+
+def rich_units(rich_text: str) -> list[list[str]]:
+    """Group rich paragraphs so each group lines up with one text-only paragraph.
+
+    A paragraph that is nothing but image tokens has no text-only counterpart,
+    so it rides along with the next paragraph (or the last one at the end).
+    """
+    units: list[list[str]] = []
+    pending: list[str] = []
+    for paragraph in split_paragraphs(rich_text):
+        if IMG_TOKEN_RE.sub("", paragraph).strip():
+            units.append(pending + [paragraph])
+            pending = []
+        else:
+            pending.append(paragraph)
+    if pending:
+        if units:
+            units[-1].extend(pending)
+        else:
+            units.append(pending)
+    return units
+
+
+def split_rich_text(text: str, rich_text: str, max_chars: int) -> list[str]:
+    """Split image-bearing text at the same places split_text would split `text`.
+
+    Chunk count, titles and ids then match a text-only import of the same book.
+    """
+    paragraphs = split_paragraphs(text)
+    units = rich_units(rich_text)
+    if paragraphs and len(units) == len(paragraphs):
+        ranges = split_ranges(paragraphs, max_chars)
+    else:
+        # Paragraphs did not line up; measure image tokens as one character instead.
+        print("warning: image text did not line up with plain text; chunking it separately", file=sys.stderr)
+        ranges = split_ranges([IMG_TOKEN_RE.sub("#", "\n\n".join(unit)) for unit in units], max_chars)
+    chunks = ["\n\n".join(p for unit in units[start:end] for p in unit) for start, end in ranges]
+    return chunks or [rich_text.strip()]
 
 
 def chunk_id(index: int) -> str:
@@ -93,7 +146,11 @@ def write_book_sections(
     for section_index, section in enumerate(sections):
         section_title = section.get("title") or f"Section {section_index + 1}"
         section_text = section.get("text") or ""
-        section_chunks = split_text(section_text, max_chars)
+        rich_text = section.get("richText")
+        if rich_text is None:
+            section_chunks = split_text(section_text, max_chars)
+        else:
+            section_chunks = split_rich_text(section_text, rich_text, max_chars)
         for part_index, chunk in enumerate(section_chunks):
             part_count = len(section_chunks)
             display_title = section_title if part_count == 1 else f"{section_title} Part {part_index + 1}/{part_count}"
@@ -106,6 +163,7 @@ def write_book_sections(
                     "sectionPart": part_index + 1,
                     "sectionPartCount": part_count,
                     "sourcePath": section.get("sourcePath"),
+                    "hasImages": rich_text is not None,
                 }
             )
 
@@ -127,7 +185,7 @@ def write_book_sections(
                 "order": index,
                 "path": f"chunks/{cid}.txt",
                 "charCount": len(chunk),
-                "wordCount": count_words(chunk),
+                "wordCount": count_words(IMG_TOKEN_RE.sub(" ", chunk) if planned["hasImages"] else chunk),
                 "prevId": chunk_id(index - 1) if index > 0 else None,
                 "nextId": chunk_id(index + 1) if index < len(planned_chunks) - 1 else None,
             }

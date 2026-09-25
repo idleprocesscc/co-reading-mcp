@@ -24,6 +24,8 @@ Input:
 
 Returns the chunk text plus neighboring ids.
 
+For EPUBs imported with `keepImages`, the text contains `[[img:assets/<file>]]` placeholders where the book had an image or formula. They are plain text; Claude can read around them, and the reader renders them from `GET /api/books/:bookId/asset/assets/<file>`.
+
 ## `reading_continue`
 
 Input:
@@ -76,6 +78,8 @@ For TXT/Markdown imports, optional fields mirror `scripts/import_text.py`:
   "maxChars": 6000
 }
 ```
+
+For EPUB imports, `"keepImages": true` keeps pictures and formula images: they are copied to `data/books/<book-id>/assets/` and replaced in the text by `[[img:assets/<file>]]` tokens (a token on its own paragraph is a figure or display formula; a token inside a sentence is inline). `<sup>`/`<sub>` become Unicode where possible (`t²`, `x₀`). Sections, chunk titles, and chunk ids stay identical to an import without `keepImages`, so progress and notes keep lining up. The default is `false`.
 
 The server validates the file type, upload size, and `bookId`, writes the book into `data/books`, and returns the imported `bookId`, title, and chunk count.
 

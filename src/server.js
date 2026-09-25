@@ -60,7 +60,8 @@ export const tools = [
   },
   {
     name: "reading_read_chunk",
-    description: "Read one book chunk and return prevId/nextId.",
+    description:
+      "Read one book chunk and return prevId/nextId. Text may contain [[img:assets/<file>]] placeholders where an EPUB imported with keepImages had an image or formula.",
     inputSchema: {
       type: "object",
       required: ["bookId", "chunkId"],
@@ -113,6 +114,11 @@ export const tools = [
         headingRegex: { type: "string" },
         minSectionChars: { type: "number" },
         overwrite: { type: "boolean" },
+        keepImages: {
+          type: "boolean",
+          description:
+            "EPUB only. Copy images into the book's assets/ folder and leave [[img:assets/<file>]] placeholders in the chunk text. Chunk ids stay the same as a text-only import.",
+        },
       },
       additionalProperties: false,
     },
@@ -136,6 +142,10 @@ export const tools = [
         headingRegex: { type: "string" },
         minSectionChars: { type: "number" },
         overwrite: { type: "boolean" },
+        keepImages: {
+          type: "boolean",
+          description: "EPUB only. Same as keepImages on reading_import_book.",
+        },
       },
       additionalProperties: false,
     },

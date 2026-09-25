@@ -114,6 +114,93 @@ if (!singleItemManifest.chunks.some((chunk) => chunk.sectionTitle === "Inner Cha
 if (!singleItemManifest.chunks.some((chunk) => chunk.sectionTitle === "Inner Chapter Two")) {
   throw new Error("single-spine EPUB import did not split second internal heading");
 }
+const imageEpub = path.join(tempDataDir, "image-demo.epub");
+execFileSync(
+  "python3",
+  ["-", imageEpub],
+  {
+    input: `
+import sys, zipfile
+epub = sys.argv[1]
+png = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
+with zipfile.ZipFile(epub, "w") as zf:
+    zf.writestr("mimetype", "application/epub+zip")
+    zf.writestr("META-INF/container.xml", """<?xml version='1.0'?>
+<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container' version='1.0'>
+  <rootfiles><rootfile full-path='OEBPS/content.opf' media-type='application/oebps-package+xml'/></rootfiles>
+</container>""")
+    zf.writestr("OEBPS/content.opf", """<?xml version='1.0'?>
+<package xmlns='http://www.idpf.org/2007/opf' version='3.0'>
+  <metadata xmlns:dc='http://purl.org/dc/elements/1.1/'><dc:title>Image Demo</dc:title></metadata>
+  <manifest>
+    <item id='cover' href='Text/cover.xhtml' media-type='application/xhtml+xml'/>
+    <item id='c1' href='Text/c1.xhtml' media-type='application/xhtml+xml'/>
+    <item id='c2' href='Text/c2.xhtml' media-type='application/xhtml+xml'/>
+  </manifest>
+  <spine><itemref idref='cover'/><itemref idref='c1'/><itemref idref='c2'/></spine>
+</package>""")
+    zf.writestr("OEBPS/Text/cover.xhtml", "<html><body><div><img src='../Images/cover.jpg'/></div></body></html>")
+    zf.writestr("OEBPS/Text/c1.xhtml", """<html><body><h1>Motion</h1>
+      <p>It can be written as:</p><div class='equation_img'><img src='../Images/eq%201.png'/></div>
+      <p>where <img src='../Images/f.png'/> is the force and t<sup>2</sup> meets l<sub>1</sub>.</p></body></html>""")
+    zf.writestr("OEBPS/Text/c2.xhtml", "<html><body><h1>Energy</h1>" + "".join(
+        f"<p>Paragraph {i} about energy, long enough to split this section into parts.</p>"
+        + (f"<div><img src='../Images/e{i}.png'/></div>" if i % 2 else "") for i in range(8)) + "</body></html>")
+    for name in ["cover.jpg", "eq 1.png", "f.png"] + [f"e{i}.png" for i in range(1, 8, 2)]:
+        zf.writestr("OEBPS/Images/" + name, png)
+`,
+    encoding: "utf8",
+  },
+);
+for (const [bookId, extra] of [["image-demo-text", []], ["image-demo", ["--keep-images"]]]) {
+  execFileSync("python3", [
+    path.join(root, "scripts/import_epub.py"),
+    imageEpub,
+    "--out",
+    path.join(tempDataDir, "books"),
+    "--book-id",
+    bookId,
+    "--max-chars",
+    "200",
+    ...extra,
+  ], { stdio: ["ignore", "ignore", "ignore"] });
+}
+const imageTextManifest = JSON.parse(
+  await readFile(path.join(tempDataDir, "books", "image-demo-text", "manifest.json"), "utf8"),
+);
+const imageManifest = JSON.parse(await readFile(path.join(tempDataDir, "books", "image-demo", "manifest.json"), "utf8"));
+const chunkShape = (manifest) => manifest.chunks.map(({ id, title, sectionTitle, sourcePath }) => ({ id, title, sectionTitle, sourcePath }));
+if (JSON.stringify(chunkShape(imageTextManifest)) !== JSON.stringify(chunkShape(imageManifest))) {
+  throw new Error("--keep-images changed chunk ids, titles, or section boundaries");
+}
+if (imageManifest.chunks.length < 3 || !imageManifest.chunks.some((chunk) => chunk.sectionPartCount > 1)) {
+  throw new Error("image EPUB smoke fixture did not exercise a split section");
+}
+const imageChunkTexts = await Promise.all(
+  imageManifest.chunks.map((chunk) => readFile(path.join(tempDataDir, "books", "image-demo", chunk.path), "utf8")),
+);
+const imageTokens = imageChunkTexts.join("\n").match(/\[\[img:assets\/[^\]]+\]\]/g) || [];
+if (imageTokens.length !== 7) {
+  throw new Error(`--keep-images wrote ${imageTokens.length} image tokens, expected 7`);
+}
+if (!imageChunkTexts[0].includes("Motion\n\n[[img:assets/cover.jpg]]")) {
+  throw new Error("--keep-images did not fold the image-only cover page into the next section");
+}
+if (!imageChunkTexts[0].includes("written as:\n\n[[img:assets/eq-1.png]]\n\nwhere [[img:assets/f.png]] is the force")) {
+  throw new Error("--keep-images did not keep block and inline image positions");
+}
+if (!imageChunkTexts[0].includes("t² meets l₁")) {
+  throw new Error("--keep-images did not convert sup/sub to Unicode");
+}
+for (const token of imageTokens) {
+  await readFile(path.join(tempDataDir, "books", "image-demo", token.slice(6, -2)));
+}
+const imageTextChunkTexts = await Promise.all(
+  imageTextManifest.chunks.map((chunk) => readFile(path.join(tempDataDir, "books", "image-demo-text", chunk.path), "utf8")),
+);
+if (imageTextChunkTexts.some((text) => text.includes("[[img:"))) {
+  throw new Error("EPUB import without --keep-images wrote image tokens");
+}
 const tempTxt = path.join(tempDataDir, "heading-demo.txt");
 await writeFile(
   tempTxt,

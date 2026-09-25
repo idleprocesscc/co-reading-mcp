@@ -31,6 +31,21 @@ Each imported book lives under `data/books/<book-id>/manifest.json`.
 
 `path` is relative to the book directory.
 
+### Images
+
+EPUBs imported with `--keep-images` (or `keepImages: true`) also get an `assets/` folder:
+
+```text
+data/books/<book-id>/
+  manifest.json
+  chunks/ch00.txt ...
+  assets/Figure-P90_47975.jpg ...
+```
+
+The chunk text refers to them with `[[img:assets/<file>]]`. A token that fills a whole paragraph is a figure or display formula; a token inside a sentence is an inline image. `charCount` includes the tokens; `wordCount` ignores them. Books imported without images have no `assets/` folder and no tokens.
+
+Every folder under `data/books/` that contains a `manifest.json` is treated as a book, so keep manual backups of a book folder outside `data/books/`.
+
 ## Annotations
 
 Annotations are stored as JSONL in `data/annotations.jsonl`.
