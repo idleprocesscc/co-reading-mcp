@@ -126,7 +126,7 @@ EPUB:
 python3 scripts/import_epub.py ./book.epub --out ./data/books
 ```
 
-Add `--keep-images` to keep pictures and formula images (useful for textbooks). Images are copied to `data/books/<book-id>/assets/`, the text gets `[[img:assets/<file>]]` placeholders, and `<sup>`/`<sub>` become Unicode (`t²`, `x₀`). Chunk ids and titles stay the same as a text-only import, so re-importing an existing book with images keeps its progress and notes lined up. The bundled reader renders the placeholders as images; MCP clients see them as plain text.
+Add `--keep-images` to keep pictures and formula images (useful for textbooks). Images are copied to `data/books/<book-id>/assets/`, the text gets `[[img:assets/<file>]]` placeholders, and `<sup>`/`<sub>` become Unicode (`t²`, `x₀`). Chunk ids and titles stay the same as a text-only import, so re-importing an existing book with images keeps its progress and notes attached to the same chunks (an older note whose quote crossed an image or a superscript keeps its margin card but may lose its in-text highlight). The bundled reader renders the placeholders as images; MCP clients see them as plain text.
 
 Claude can also import books through MCP, which is useful on claude.ai or mobile devices where the user cannot SSH into the server:
 
