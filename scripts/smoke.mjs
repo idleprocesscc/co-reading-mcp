@@ -260,6 +260,12 @@ await writeFile(
         lastReadAt: "2026-05-22T00:00:01.000Z",
         readChunkIds: ["ch00", "missing-old-chunk"],
       },
+      "image-demo": {
+        lastChapterId: "ch01",
+        lastReadAt: "2026-05-22T00:00:02.000Z",
+        readChapterIds: ["ch00", "ch01"],
+        lastReadAtLegacyMs: 1747872002000,
+      },
     },
     null,
     2,
@@ -324,6 +330,25 @@ async function appendLocalUserNote({ id, note }) {
 }
 
 await request("initialize", {});
+// Progress written by a chapter-based reader on the same data dir (readChapterIds / lastChapterId).
+const chapterProgressContinue = await request("tools/call", { name: "reading_continue", arguments: { bookId: "image-demo" } });
+const chapterProgressMark = await request("tools/call", {
+  name: "reading_mark_read",
+  arguments: { bookId: "image-demo", chunkId: "ch02" },
+});
+const chapterProgressEntry = JSON.parse(await readFile(path.join(tempDataDir, "progress.json"), "utf8"))["image-demo"];
+if (contentJson(chapterProgressContinue).chunk?.id !== "ch02") {
+  throw new Error("reading_continue ignored lastChapterId / readChapterIds progress");
+}
+if (contentJson(chapterProgressMark).chunksRead !== 3 || chapterProgressEntry.lastReadAtLegacyMs !== 1747872002000) {
+  throw new Error("reading_mark_read dropped chapter-based progress or other readers' fields");
+}
+if (chapterProgressEntry.lastChapterId !== "ch02" || chapterProgressEntry.readChapterIds?.length !== 3) {
+  throw new Error("reading_mark_read did not mirror progress into lastChapterId / readChapterIds");
+}
+if (contentJson(chapterProgressMark).cardNotification && contentJson(chapterProgressMark).cardNotification.cardId && !contentJson(chapterProgressMark).collectedCard && !contentJson(chapterProgressMark).collectedBookCard) {
+  throw new Error("reading_mark_read announced a card it did not collect");
+}
 const list = await request("tools/call", { name: "reading_list_books", arguments: {} });
 const read = await request("tools/call", {
   name: "reading_read_chunk",
