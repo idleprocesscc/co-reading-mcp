@@ -22,13 +22,9 @@ const defaultTrashRetentionDays = 30;
 
 const manifestCache = new Map();
 const chunkTextCache = new Map();
-const annotationCache = {
-  signature: null,
-  rows: [],
-  bookCounts: new Map(),
-  chunkCounts: new Map(),
-};
+const annotationCache = {};
 let writeQueue = Promise.resolve();
+invalidateAnnotationCache();
 
 function invalidateAnnotationCache() {
   annotationCache.signature = null;
@@ -40,8 +36,45 @@ function invalidateAnnotationCache() {
   annotationCache.publicChunkCounts = new Map();
 }
 
+// Writes are serialized in-process by writeQueue and across processes (e.g. src/server.js for
+// Claude plus src/http.js for the reader on the same data dir) by a lock directory: mkdir is
+// atomic, so only one process holds it. A lock left by a killed process expires.
+const lockDir = path.join(dataDir, ".write-lock");
+const LOCK_STALE_MS = 60_000;
+
+async function acquireDataLock() {
+  await mkdir(dataDir, { recursive: true });
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await mkdir(lockDir);
+      return;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    try {
+      const info = await stat(lockDir);
+      if (Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+        await rm(lockDir, { recursive: true, force: true });
+        continue;
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(10 * 2 ** attempt, 200)));
+  }
+}
+
 async function withWriteLock(operation) {
-  const run = writeQueue.then(operation, operation);
+  const locked = async () => {
+    await acquireDataLock();
+    try {
+      return await operation();
+    } finally {
+      await rm(lockDir, { recursive: true, force: true });
+    }
+  };
+  const run = writeQueue.then(locked, locked);
   writeQueue = run.catch(() => {});
   return run;
 }
@@ -65,15 +98,26 @@ async function fileSignature(filePath) {
   }
 }
 
-async function writeJson(filePath, value) {
+/** Replace a file in one step (write a temp file, then rename) so readers never see half of it. */
+async function writeFileAtomic(filePath, body) {
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  const tempPath = `${filePath}.${process.pid}.${crypto.randomBytes(3).toString("hex")}.tmp`;
+  try {
+    await writeFile(tempPath, body, "utf8");
+    await rename(tempPath, filePath);
+  } catch (error) {
+    await rm(tempPath, { force: true });
+    throw error;
+  }
+}
+
+async function writeJson(filePath, value) {
+  await writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function writeJsonl(filePath, rows) {
-  await mkdir(path.dirname(filePath), { recursive: true });
   const body = rows.map((row) => JSON.stringify(row)).join("\n");
-  await writeFile(filePath, body ? `${body}\n` : "", "utf8");
+  await writeFileAtomic(filePath, body ? `${body}\n` : "");
 }
 
 function safeTrashName(value) {
@@ -1063,22 +1107,31 @@ function cardSummary(card) {
   return summary;
 }
 
+function cardScope(card) {
+  return card.scope || card.context?.scope || "section";
+}
+
+/** All cards for a book (or every book), newest first. */
+async function newestCards(bookId) {
+  return (await readAllCards())
+    .filter((card) => !bookId || card.bookId === bookId)
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+}
+
 export async function listCards({ bookId, chunkId, source, scope, limit = 20, offset = 0 } = {}) {
   const max = Math.min(Math.max(Number(limit) || 20, 1), 100);
   const start = Math.max(Number(offset) || 0, 0);
-  return (await readAllCards())
-    .filter((card) => !bookId || card.bookId === bookId)
+  return (await newestCards(bookId))
     .filter((card) => !chunkId || card.chunkId === chunkId)
     .filter((card) => !source || card.source === source)
-    .filter((card) => !scope || (card.scope || card.context?.scope || "section") === scope)
-    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .filter((card) => !scope || cardScope(card) === scope)
     .slice(start, start + max)
     .map(cardSummary);
 }
 
 export async function listCardInbox({ bookId, limit = 10 } = {}) {
   const max = Math.min(Math.max(Number(limit) || 10, 1), 100);
-  return (await listCards({ bookId, limit: 10_000, offset: 0 }))
+  return (await newestCards(bookId))
     .filter((card) => (card.status || "new") !== "dismissed")
     .slice(0, max)
     .map((card) => ({
@@ -1094,20 +1147,20 @@ export async function listCardInbox({ bookId, limit = 10 } = {}) {
 export async function listCardCollection({ bookId, limit = 12, offset = 0 } = {}) {
   const max = Math.min(Math.max(Number(limit) || 12, 1), 50);
   const start = Math.max(Number(offset) || 0, 0);
-  const all = await listCards({ bookId, limit: 10_000, offset: 0 });
+  const all = await newestCards(bookId);
   const toItem = (card) => ({
     id: card.id,
     title: card.title || card.bookTitle || "Reading card",
     subtitle: card.subtitle || [card.bookTitle, card.chunkTitle].filter(Boolean).join(" · "),
     kicker: card.kicker || "收获了一枚回声书签",
     art: card.art || "fold",
-    scope: card.scope || card.context?.scope || "section",
+    scope: cardScope(card),
     status: card.status || "new",
     createdAt: card.createdAt,
     hint: "Open with reading_open_card when you want to view the card image.",
   });
-  const bookCards = all.filter((card) => (card.scope || card.context?.scope) === "book").map(toItem);
-  const sectionCards = all.filter((card) => (card.scope || card.context?.scope || "section") !== "book");
+  const bookCards = all.filter((card) => cardScope(card) === "book").map(toItem);
+  const sectionCards = all.filter((card) => cardScope(card) !== "book");
   const items = sectionCards.slice(start, start + max).map(toItem);
   return {
     offset: start,
@@ -1261,19 +1314,22 @@ export async function annotatePassage(input) {
       quoteOffset: quoteOffset >= 0 ? quoteOffset : null,
       prevId: chunk.prevId,
       nextId: chunk.nextId,
-      annotationIndexInBook,
-      annotationIndexInChunk,
-      replyIndex,
       createdAt: new Date().toISOString(),
     };
-    annotation.message = parentId
-      ? `Saved reply ${replyIndex} under annotation ${parentId}.`
-      : `Saved annotation ${annotationIndexInBook} in this book (${annotationIndexInChunk} in this chunk).`;
 
     await mkdir(dataDir, { recursive: true });
     await appendFile(annotationsPath, `${JSON.stringify(annotation)}\n`, "utf8");
     invalidateAnnotationCache();
-    return annotation;
+    // Counts and the message are feedback for the caller only; they go stale, so they aren't stored.
+    return {
+      ...annotation,
+      annotationIndexInBook,
+      annotationIndexInChunk,
+      replyIndex,
+      message: parentId
+        ? `Saved reply ${replyIndex} under annotation ${parentId}.`
+        : `Saved annotation ${annotationIndexInBook} in this book (${annotationIndexInChunk} in this chunk).`,
+    };
   });
 }
 

@@ -157,7 +157,7 @@ The server keeps lightweight in-process caches:
 - chunk text is cached by file signature for repeated reads/searches
 - annotation counts are cached by `annotations.jsonl` signature
 
-Writes that change annotations clear the annotation cache immediately. Writes to annotations, progress, and session context are serialized through an in-process queue to avoid read-modify-write overlap in multi-client use. Restarting the server clears all caches.
+Writes that change annotations clear the annotation cache immediately. Writes to annotations, progress, cards, submissions, and session context are serialized through an in-process queue plus a `data/.write-lock` directory, so two processes on the same data dir (for example `src/server.js` for Claude and `src/http.js` for the reader) can't overwrite each other's changes. A lock left behind by a killed process expires after 60 seconds. JSON files are replaced atomically (temp file + rename). Restarting the server clears all caches.
 
 ## Trash
 
