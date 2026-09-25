@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { resolveInside } from "./paths.js";
 import { dataDir } from "./store.js";
 
 const execFileAsync = promisify(execFile);
@@ -40,16 +41,6 @@ function withImportLock(operation) {
   const run = importQueue.then(operation, operation);
   importQueue = run.catch(() => {});
   return run;
-}
-
-function resolveInside(baseDir, ...parts) {
-  const base = path.resolve(baseDir);
-  const resolved = path.resolve(base, ...parts);
-  const relative = path.relative(base, resolved);
-  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
-    return resolved;
-  }
-  throw new Error(`Path escapes import directory: ${parts.join("/")}`);
 }
 
 function safeBookId(value) {
@@ -157,11 +148,7 @@ function importerArgs(filePath, options) {
   const script = options.format === "epub" ? "scripts/import_epub.py" : "scripts/import_text.py";
   const args = [path.join(ROOT, script), filePath, "--out", booksDir];
 
-  if (options.format === "txt") {
-    args.push("--title", options.title || titleFromFilename(options.filename));
-  } else {
-    args.push("--title", options.title || titleFromFilename(options.filename));
-  }
+  args.push("--title", options.title || titleFromFilename(options.filename));
 
   if (options.author) args.push("--author", options.author);
   if (options.bookId) args.push("--book-id", options.bookId);

@@ -30,15 +30,7 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const publicDir = path.join(ROOT, "public");
 const defaultMaxBodyBytes = Number(process.env.READING_HTTP_MAX_BODY_BYTES || process.env.READING_IMPORT_MAX_BYTES || 25_000_000);
 
-const contentTypes = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-};
-
-const assetContentTypes = {
+const imageContentTypes = {
   ".avif": "image/avif",
   ".bmp": "image/bmp",
   ".gif": "image/gif",
@@ -47,6 +39,14 @@ const assetContentTypes = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".webp": "image/webp",
+};
+
+const contentTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ...imageContentTypes,
 };
 
 export function sendJson(res, status, value) {
@@ -119,7 +119,7 @@ async function serveBookAsset(req, res, rawPath) {
     return;
   }
   res.writeHead(200, {
-    "content-type": assetContentTypes[path.extname(asset.path).toLowerCase()] || "application/octet-stream",
+    "content-type": imageContentTypes[path.extname(asset.path).toLowerCase()] || "application/octet-stream",
     "content-length": String(asset.size),
     "cache-control": cacheControl,
     "last-modified": asset.mtime.toUTCString(),

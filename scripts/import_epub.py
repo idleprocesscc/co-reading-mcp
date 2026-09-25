@@ -288,17 +288,6 @@ def parse_toc_titles(zf: zipfile.ZipFile, toc_path: str, opf_dir: str) -> dict[s
             return href
         return str(Path(opf_dir) / href) if opf_dir and not href.startswith(opf_dir) else href
 
-    parent_map = {child: parent for parent in root.iter() for child in parent}
-    for element in root.iter():
-        if ns_name(element.tag) == "content":
-            src = element.attrib.get("src", "")
-            parent = parent_map.get(element)
-            parent_text = "".join(parent.itertext()).strip() if parent is not None else None
-            # NCX puts text in a nearby navLabel; ElementTree has no parent links,
-            # so NCX titles are handled in the navPoint loop below.
-            if src and parent_text:
-                titles[normalize_href(src)] = parent_text
-
     for nav_point in root.iter():
         if ns_name(nav_point.tag) != "navPoint":
             continue

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { compactText, hashText } from "../public/card-logic.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -19,12 +20,6 @@ function escapeHtml(value = "") {
   return escapeXml(value).replace(/'/g, "&#39;");
 }
 
-function compactText(value = "", max = 160) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1)).trim()}…`;
-}
-
 function safeFilePart(value = "reading-card") {
   const text = String(value || "reading-card")
     .trim()
@@ -34,15 +29,6 @@ function safeFilePart(value = "reading-card") {
     .slice(0, 80)
     .replace(/^-|-$/g, "");
   return text || "reading-card";
-}
-
-function hashText(value) {
-  let hash = 2166136261;
-  for (const char of String(value || "")) {
-    hash ^= char.codePointAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
 }
 
 function seededRandom(seed) {

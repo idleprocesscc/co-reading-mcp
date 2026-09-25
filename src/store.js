@@ -2,7 +2,8 @@ import { appendFile, cp, mkdir, readFile, readdir, realpath, rename, rm, stat, w
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
-import { buildCardCandidates, pickCard } from "../public/card-logic.js";
+import { buildCardCandidates, hashText, isClaudeAuthor, isHumanAuthor, pickCard } from "../public/card-logic.js";
+import { resolveInside } from "./paths.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -43,16 +44,6 @@ async function withWriteLock(operation) {
   const run = writeQueue.then(operation, operation);
   writeQueue = run.catch(() => {});
   return run;
-}
-
-function resolveInside(baseDir, ...parts) {
-  const base = path.resolve(baseDir);
-  const resolved = path.resolve(base, ...parts);
-  const relative = path.relative(base, resolved);
-  if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) {
-    return resolved;
-  }
-  throw new Error(`Path escapes data directory: ${parts.join("/")}`);
 }
 
 async function readJson(filePath, fallback) {
@@ -118,6 +109,14 @@ async function pruneOldTrash(nowMs = Date.now()) {
     pruned += 1;
   }
   return { retentionDays, pruned };
+}
+
+/** Split items into [matching, rest]. */
+function partition(items, predicate) {
+  const matching = [];
+  const rest = [];
+  for (const item of items) (predicate(item) ? matching : rest).push(item);
+  return [matching, rest];
 }
 
 function asArray(value) {
@@ -280,7 +279,7 @@ function finishKicker(seed) {
     "这本书合上了",
     "页边还醒着",
   ];
-  return lines[hashString(seed) % lines.length];
+  return lines[hashText(seed) % lines.length];
 }
 
 function finishFooter(shared, seed) {
@@ -290,23 +289,14 @@ function finishFooter(shared, seed) {
       "two margins, one last fold",
       "read apart, folded together",
     ];
-    return lines[hashString(seed) % lines.length];
+    return lines[hashText(seed) % lines.length];
   }
   const lines = [
     "one reader carried it through",
     "one quiet reader reached the end",
     "carried through, page by page",
   ];
-  return lines[hashString(seed) % lines.length];
-}
-
-function hashString(value) {
-  let hash = 2166136261;
-  for (const char of String(value || "")) {
-    hash ^= char.codePointAt(0);
-    hash = Math.imul(hash, 16777619);
-  }
-  return hash >>> 0;
+  return lines[hashText(seed) % lines.length];
 }
 
 function topCount(counts) {
@@ -426,7 +416,7 @@ async function maybeCollectBookFinishCard({ manifest, progressEntry, finish = nu
     note: moment.noteSource?.note || finish?.celebration?.prompt || "The book is closed, but the margins are still awake.",
     footer: finishFooter(moment.shared, seed),
     art: "lastfold",
-    artSeed: hashString(seed),
+    artSeed: hashText(seed),
     variant: moment.shared ? "shared-finish" : "solo-finish",
     scope: "book",
     source: "book-complete",
@@ -497,15 +487,6 @@ function countAnnotationRows(rows) {
     chunkCounts.set(chunkKey, (chunkCounts.get(chunkKey) || 0) + 1);
   }
   return { bookCounts, chunkCounts };
-}
-
-function isHumanAuthor(author) {
-  return ["user", "human", "koshi", "you"].includes(String(author || "").toLowerCase());
-}
-
-function isClaudeAuthor(author) {
-  const value = String(author || "").toLowerCase();
-  return !isHumanAuthor(value) && (!value || value === "claude" || value === "assistant");
 }
 
 /** Author filter: case-insensitive; user/human/koshi/you all mean the human reader. */
@@ -601,42 +582,25 @@ export async function deleteBook(bookId) {
     const cards = await readAllCards();
     const sessions = await readJson(sessionsPath, { sessions: {} });
 
-    const removedProgress = Object.fromEntries(
-      Object.entries(progress).filter(([id]) => bookIds.has(id)),
-    );
-    const keptProgress = Object.fromEntries(
-      Object.entries(progress).filter(([id]) => !bookIds.has(id)),
-    );
-    const removedAnnotations = annotations.filter((row) => rowReferencesBook(row, bookIds));
-    const keptAnnotations = annotations.filter((row) => !rowReferencesBook(row, bookIds));
-    const removedSubmissions = submissions.filter((row) => rowReferencesBook(row, bookIds));
-    const keptSubmissions = submissions.filter((row) => !rowReferencesBook(row, bookIds));
-    const removedCards = cards.filter((row) => rowReferencesBook(row, bookIds));
-    const keptCards = cards.filter((row) => !rowReferencesBook(row, bookIds));
+    const referencesBook = (row) => rowReferencesBook(row, bookIds);
+    const [removedProgressEntries, keptProgressEntries] = partition(Object.entries(progress), ([id]) => bookIds.has(id));
+    const removedProgress = Object.fromEntries(removedProgressEntries);
+    const keptProgress = Object.fromEntries(keptProgressEntries);
+    const [removedAnnotations, keptAnnotations] = partition(annotations, referencesBook);
+    const [removedSubmissions, keptSubmissions] = partition(submissions, referencesBook);
+    const [removedCards, keptCards] = partition(cards, referencesBook);
 
     const keptSessions = { sessions: {} };
     const removedSessions = { sessions: {} };
     for (const [sessionId, session] of Object.entries(sessions.sessions || {})) {
-      const chunkEntries = Object.entries(session.chunks || {});
-      const annotationEntries = Object.entries(session.annotations || {});
-      const keptChunks = Object.fromEntries(
-        chunkEntries.filter(([key, value]) => {
-          const keyBookId = key.split("/")[0];
-          return !bookIds.has(keyBookId) && !bookIds.has(value?.bookId);
-        }),
-      );
-      const removedChunks = Object.fromEntries(
-        chunkEntries.filter(([key, value]) => {
-          const keyBookId = key.split("/")[0];
-          return bookIds.has(keyBookId) || bookIds.has(value?.bookId);
-        }),
-      );
-      const keptSessionAnnotations = Object.fromEntries(
-        annotationEntries.filter(([, value]) => !bookIds.has(value?.bookId)),
-      );
-      const removedSessionAnnotations = Object.fromEntries(
-        annotationEntries.filter(([, value]) => bookIds.has(value?.bookId)),
-      );
+      const [removedChunks, keptChunks] = partition(
+        Object.entries(session.chunks || {}),
+        ([key, value]) => bookIds.has(key.split("/")[0]) || bookIds.has(value?.bookId),
+      ).map(Object.fromEntries);
+      const [removedSessionAnnotations, keptSessionAnnotations] = partition(
+        Object.entries(session.annotations || {}),
+        ([, value]) => bookIds.has(value?.bookId),
+      ).map(Object.fromEntries);
       if (Object.keys(keptChunks).length || Object.keys(keptSessionAnnotations).length) {
         keptSessions.sessions[sessionId] = { ...session, chunks: keptChunks, annotations: keptSessionAnnotations };
       }

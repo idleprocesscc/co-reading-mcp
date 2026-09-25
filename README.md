@@ -202,6 +202,7 @@ data/
 - `reading_reply_to_annotation`
 - `reading_mark_read`
 - `reading_card_inbox`
+- `reading_card_collection`
 - `reading_open_card`
 - `reading_save_card`
 - `reading_dismiss_card`
