@@ -171,15 +171,29 @@ function sortedChunks(manifest) {
   return manifest.chunks.slice().sort((a, b) => a.order - b.order);
 }
 
+// Progress may also be written by a reader that tracks "chapters" (readChapterIds /
+// lastChapterId) over the same data dir; ids that match this book's chunks count as read.
 function validReadIds(manifest, progressEntry = {}) {
   const chunkIds = new Set(manifest.chunks.map((chunk) => chunk.id));
-  return new Set(asArray(progressEntry.readChunkIds).filter((chunkId) => chunkIds.has(chunkId)));
+  return new Set(
+    [...asArray(progressEntry.readChunkIds), ...asArray(progressEntry.readChapterIds)].filter((chunkId) =>
+      chunkIds.has(chunkId),
+    ),
+  );
+}
+
+/** The later of lastChunkId / lastChapterId that still exists in this book. */
+function effectiveLastReadId(manifest, progressEntry = {}) {
+  const orderById = new Map(manifest.chunks.map((chunk) => [chunk.id, chunk.order]));
+  const candidates = [progressEntry.lastChunkId, progressEntry.lastChapterId].filter((chunkId) => orderById.has(chunkId));
+  if (!candidates.length) return null;
+  return candidates.sort((a, b) => orderById.get(b) - orderById.get(a))[0];
 }
 
 function progressSummary(manifest, progressEntry = {}) {
   const readIds = validReadIds(manifest, progressEntry);
   return {
-    lastChunkId: manifest.chunks.some((chunk) => chunk.id === progressEntry.lastChunkId) ? progressEntry.lastChunkId : null,
+    lastChunkId: effectiveLastReadId(manifest, progressEntry),
     lastReadAt: progressEntry.lastReadAt || null,
     readChunkIds: Array.from(readIds),
     chunksRead: readIds.size,
@@ -801,7 +815,8 @@ async function resolveContinueBook(bookId) {
 function nextChunkForProgress(manifest, progressEntry = {}) {
   const chunks = sortedChunks(manifest);
   const readIds = validReadIds(manifest, progressEntry);
-  const lastIndex = chunks.findIndex((chunk) => chunk.id === progressEntry.lastChunkId);
+  const lastChunkId = effectiveLastReadId(manifest, progressEntry);
+  const lastIndex = chunks.findIndex((chunk) => chunk.id === lastChunkId);
   if (lastIndex >= 0) {
     const afterLast = chunks.slice(lastIndex + 1).find((chunk) => !readIds.has(chunk.id));
     if (afterLast) return { chunk: afterLast, reason: "after-last-read" };
@@ -984,10 +999,15 @@ export async function markRead(bookId, chunkId) {
     const current = progress[bookId] || {};
     const readIds = validReadIds(manifest, current);
     readIds.add(chunkId);
+    const readChunkIds = Array.from(readIds);
+    // Keep fields other readers store on the entry, and mirror the chapter-named ones.
     progress[bookId] = {
+      ...current,
       lastChunkId: chunkId,
+      lastChapterId: chunkId,
       lastReadAt: new Date().toISOString(),
-      readChunkIds: Array.from(readIds),
+      readChunkIds,
+      readChapterIds: readChunkIds,
     };
     await writeJson(progressPath, progress);
     const summary = progressSummary(manifest, progress[bookId]);
@@ -1027,7 +1047,9 @@ export async function markRead(bookId, chunkId) {
       targetChunk,
       progressEntry: progress[bookId],
     });
+    let cardNotification = null;
     if (collectedCard) {
+      cardNotification = notificationForCard(collectedCard);
       result.collectedCard = {
         id: collectedCard.id,
         message: collectedCard.kicker || "收获了一枚回声书签",
@@ -1043,6 +1065,7 @@ export async function markRead(bookId, chunkId) {
         finish: result.finish || null,
       });
       if (collectedBookCard) {
+        cardNotification = notificationForCard(collectedBookCard);
         result.collectedBookCard = {
           id: collectedBookCard.id,
           message: collectedBookCard.kicker || "收获了一枚合卷书签",
@@ -1052,7 +1075,7 @@ export async function markRead(bookId, chunkId) {
       }
     }
 
-    const cardNotification = await latestCardNotification({ bookId });
+    // Only announce a card this read actually produced, not an older one from another book.
     if (cardNotification) {
       result.cardNotification = cardNotification;
     }
@@ -1172,12 +1195,10 @@ export async function listCardCollection({ bookId, limit = 12, offset = 0 } = {}
   };
 }
 
-export async function latestCardNotification({ bookId } = {}) {
-  const inbox = await listCardInbox({ bookId, limit: 1 });
-  const card = inbox[0] || (bookId ? (await listCardInbox({ limit: 1 }))[0] : null);
+function notificationForCard(card) {
   if (!card) return null;
   return {
-    message: card.message || "收获了一枚回声书签",
+    message: card.message || card.kicker || "收获了一枚回声书签",
     cardId: card.id,
     title: card.title,
     subtitle: card.subtitle,
