@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { compactText, hashText } from "../public/card-logic.js";
+import { cardArtSvg } from "../public/card-art.js";
+import { compactText } from "../public/card-logic.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const execFileAsync = promisify(execFile);
@@ -33,16 +34,6 @@ function safeFilePart(value = "reading-card") {
   return text || "reading-card";
 }
 
-function seededRandom(seed) {
-  let value = (Number(seed) || 1) >>> 0;
-  return () => {
-    value ^= value << 13;
-    value ^= value >>> 17;
-    value ^= value << 5;
-    return (value >>> 0) / 4294967296;
-  };
-}
-
 function wrapText(text, maxChars, maxLines) {
   const chars = Array.from(compactText(text, maxChars * maxLines));
   const lines = [];
@@ -58,70 +49,6 @@ function wrapText(text, maxChars, maxLines) {
   }
   if (line) lines.push(line);
   return lines.slice(0, maxLines);
-}
-
-function artSvg(card, width, height) {
-  const random = seededRandom(card.artSeed || hashText(`${card.id}:${card.quote}:${card.note}`));
-  if (card.art === "lastfold" || (card.scope || card.context?.scope) === "book") {
-    const density = Array.isArray(card.context?.density) ? card.context.density.map((value) => Number(value) || 0) : [];
-    const max = Math.max(...density, 1);
-    const points = density.length ? density : Array.from({ length: 18 }, () => Math.floor(random() * 3));
-    const left = width * 0.15;
-    const right = width * 0.86;
-    const base = height * 0.34;
-    const amplitude = height * 0.09;
-    const pathLine = points.map((value, index) => {
-      const x = left + (right - left) * (points.length <= 1 ? 0 : index / (points.length - 1));
-      const y = base - (value / max) * amplitude + (random() - 0.5) * 5;
-      return `${index === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
-    }).join(" ");
-    const spineX = width * (0.82 + random() * 0.05);
-    const spine = `<path d="M ${spineX.toFixed(1)} 34 C ${(spineX - 8).toFixed(1)} ${(height * 0.36).toFixed(1)} ${(spineX + 7).toFixed(1)} ${(height * 0.7).toFixed(1)} ${spineX.toFixed(1)} ${(height - 34).toFixed(1)}" fill="none" stroke="#514a42" stroke-width="0.8" opacity="0.11"/>`;
-    const quietLines = Array.from({ length: 8 }, () => {
-      const x = 44 + random() * (width - 88);
-      return `<path d="M ${x.toFixed(1)} 40 L ${(x + (random() - 0.5) * 16).toFixed(1)} ${(height - 46).toFixed(1)}" fill="none" stroke="#514a42" stroke-width="0.55" opacity="${(0.035 + random() * 0.07).toFixed(3)}"/>`;
-    }).join("");
-    const wave = `<path d="${pathLine}" fill="none" stroke="#6e665d" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round" opacity="0.24"/>`;
-    return `${quietLines}${spine}<line x1="${(width * 0.13).toFixed(1)}" y1="${(height * 0.52).toFixed(1)}" x2="${(width * 0.87).toFixed(1)}" y2="${(height * 0.52).toFixed(1)}" stroke="#2b2722" stroke-width="0.7" opacity="0.10"/>${wave}`;
-  }
-  if (card.art === "ripple") {
-    const centers = [
-      [width * (0.24 + random() * 0.1), height * (0.2 + random() * 0.08)],
-      [width * (0.56 + random() * 0.12), height * (0.42 + random() * 0.12)],
-      [width * (0.2 + random() * 0.08), height * (0.68 + random() * 0.08)],
-    ];
-    return centers
-      .flatMap(([cx, cy], groupIndex) =>
-        Array.from({ length: groupIndex === 1 ? 4 : 3 }, (_, index) => {
-          const radius = 34 + index * (30 + random() * 16) + random() * 10;
-          const opacity = 0.035 + random() * 0.055;
-          return `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${radius.toFixed(1)}" fill="none" stroke="#665648" stroke-width="1.2" opacity="${opacity.toFixed(3)}"/>`;
-        }),
-      )
-      .join("");
-  }
-  if (card.art === "stardust") {
-    const dots = Array.from({ length: 72 }, () => {
-      const cx = 28 + random() * (width - 56);
-      const cy = 38 + random() * (height - 90);
-      const radius = 0.35 + random() * 0.95;
-      const opacity = 0.16 + random() * 0.38;
-      return `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${radius.toFixed(2)}" fill="#584e40" opacity="${opacity.toFixed(3)}"/>`;
-    }).join("");
-    const crosses = Array.from({ length: 7 }, () => {
-      const cx = 48 + random() * (width - 96);
-      const cy = 58 + random() * (height - 116);
-      const opacity = 0.18 + random() * 0.22;
-      return `<path d="M ${(cx - 3).toFixed(1)} ${cy.toFixed(1)} L ${(cx + 3).toFixed(1)} ${cy.toFixed(1)} M ${cx.toFixed(1)} ${(cy - 3).toFixed(1)} L ${cx.toFixed(1)} ${(cy + 3).toFixed(1)}" stroke="#584e40" stroke-width="0.7" opacity="${opacity.toFixed(3)}"/>`;
-    }).join("");
-    return `${dots}${crosses}`;
-  }
-  return Array.from({ length: 16 }, () => {
-    const x = 34 + random() * (width - 68);
-    const drift = (random() - 0.5) * 34;
-    const opacity = 0.045 + random() * 0.1;
-    return `<path d="M ${x.toFixed(1)} 18 C ${(x + drift).toFixed(1)} ${(height * 0.32).toFixed(1)} ${(x - drift).toFixed(1)} ${(height * 0.68).toFixed(1)} ${x.toFixed(1)} ${(height - 18).toFixed(1)}" fill="none" stroke="#4c453d" stroke-width="0.9" opacity="${opacity.toFixed(3)}"/>`;
-  }).join("");
 }
 
 function cardArtLabel(card = {}) {
@@ -229,7 +156,7 @@ export function renderCardSvg(card = {}) {
   <rect width="100%" height="100%" fill="transparent"/>
   <rect x="24" y="24" width="${width - 48}" height="${height - 48}" rx="48" fill="url(#paper)" filter="url(#shadow)"/>
   <rect x="24.5" y="24.5" width="${width - 49}" height="${height - 49}" rx="47.5" fill="none" stroke="#ffffff" stroke-opacity="0.8"/>
-  <g>${artSvg(card, width, height)}</g>
+  <g color="#584e40">${cardArtSvg(card, width, height)}</g>
   <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'PingFang SC', sans-serif" fill="#28241f">
     <text x="76" y="92" font-size="20" font-weight="800" letter-spacing="2" fill="#9d968d">${escapeXml(compactText(card.sourceLabel || cardArtLabel(card), 26).toUpperCase())}</text>
     <text x="76" y="146" font-size="22" font-weight="800" fill="#777168">${escapeXml(card.kicker || "收获了一枚回声书签")}</text>
@@ -252,7 +179,7 @@ export function renderCardHtml(card = {}) {
   const cardWidth = 360;
   const frameWidth = 396;
   const artHeight = 760;
-  const art = artSvg(card, cardWidth, artHeight);
+  const art = cardArtSvg(card, cardWidth, artHeight);
   const kind = cardArtClass(card);
   const palette = cardPalette(card);
   const totalLength = [card.quote, card.note].filter(Boolean).join("").length;
@@ -338,7 +265,7 @@ export function renderCardHtml(card = {}) {
   .foot { margin: 0; color: #817b72; font-size: 13px; }
 </style>
 <article class="card ${escapeHtml(kind)} ${escapeHtml(sizeClass)}">
-  <div class="art"><svg viewBox="0 0 ${cardWidth} ${artHeight}" preserveAspectRatio="none">${art}</svg></div>
+  <div class="art"><svg viewBox="0 0 ${cardWidth} ${artHeight}" preserveAspectRatio="none" color="#584e40">${art}</svg></div>
   <div class="content">
     <p class="name">${escapeHtml(cardArtLabel(card))}</p>
     <p class="kicker">${escapeHtml(card.kicker || "收获了一枚回声书签")}</p>

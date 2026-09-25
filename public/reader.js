@@ -1,3 +1,4 @@
+import { cardArtSvg } from "./card-art.js";
 import { buildCardCandidates, pickCard, sharedNoteIdSet } from "./card-logic.js";
 
 const state = {
@@ -389,65 +390,8 @@ function renderCardPanel() {
   $("card-preview").innerHTML = renderReadingCard(card);
 }
 
-function seededRandom(seed) {
-  let value = (Number(seed) || 1) >>> 0;
-  return () => {
-    value ^= value << 13;
-    value ^= value >>> 17;
-    value ^= value << 5;
-    return (value >>> 0) / 4294967296;
-  };
-}
-
 function readingCardArt(card) {
-  const random = seededRandom(card.artSeed || 1);
-  if (card.art === "ripple") {
-    const centers = [
-      [25 + random() * 18, 20 + random() * 18],
-      [58 + random() * 18, 48 + random() * 18],
-      [22 + random() * 14, 72 + random() * 12],
-    ];
-    const circles = centers
-      .flatMap(([cx, cy], groupIndex) =>
-        Array.from({ length: groupIndex === 1 ? 4 : 3 }, (_, index) => {
-          const radius = 8 + index * (6 + random() * 3) + random() * 2;
-          const opacity = 0.035 + random() * 0.06;
-          return `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(2)}" opacity="${opacity.toFixed(3)}" />`;
-        }),
-      )
-      .join("");
-    return `<svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="0.36">${circles}</g></svg>`;
-  }
-  if (card.art === "stardust") {
-    const dots = Array.from({ length: 64 }, () => {
-      const cx = 7 + random() * 86;
-      const cy = 8 + random() * 80;
-      const radius = 0.08 + random() * 0.24;
-      const opacity = 0.18 + random() * 0.42;
-      return `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(2)}" opacity="${opacity.toFixed(3)}" />`;
-    }).join("");
-    const bright = Array.from({ length: 7 }, () => {
-      const cx = 12 + random() * 76;
-      const cy = 12 + random() * 72;
-      const opacity = 0.22 + random() * 0.26;
-      return `<path d="M ${(cx - 0.9).toFixed(2)} ${cy.toFixed(2)} L ${(cx + 0.9).toFixed(2)} ${cy.toFixed(2)} M ${cx.toFixed(2)} ${(cy - 0.9).toFixed(2)} L ${cx.toFixed(2)} ${(cy + 0.9).toFixed(2)}" opacity="${opacity.toFixed(3)}" />`;
-    }).join("");
-    const lines = Array.from({ length: 5 }, () => {
-      const x1 = 8 + random() * 84;
-      const y1 = 10 + random() * 76;
-      const x2 = x1 + (random() - 0.5) * 12;
-      const y2 = y1 + (random() - 0.5) * 12;
-      return `<path d="M ${x1.toFixed(2)} ${y1.toFixed(2)} L ${x2.toFixed(2)} ${y2.toFixed(2)}" opacity="0.07" />`;
-    }).join("");
-    return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><g fill="currentColor">${dots}</g><g fill="none" stroke="currentColor" stroke-width="0.14">${lines}${bright}</g></svg>`;
-  }
-  const lines = Array.from({ length: 14 }, () => {
-    const x = 8 + random() * 84;
-    const drift = (random() - 0.5) * 10;
-    const opacity = 0.06 + random() * 0.14;
-    return `<path d="M ${x.toFixed(2)} 3 C ${(x + drift).toFixed(2)} 30 ${(x - drift).toFixed(2)} 62 ${x.toFixed(2)} 97" opacity="${opacity.toFixed(3)}" />`;
-  }).join("");
-  return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="0.32">${lines}</g></svg>`;
+  return `<svg viewBox="0 0 420 460" preserveAspectRatio="xMidYMid slice" aria-hidden="true">${cardArtSvg(card, 420, 460)}</svg>`;
 }
 
 function renderReadingCard(card) {

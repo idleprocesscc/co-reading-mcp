@@ -503,7 +503,8 @@ h2 {
 .card-art {
   position: absolute;
   inset: 0;
-  color: rgba(155, 115, 85, 0.75);
+  /* Same ink as the exported card images (src/card-renderer.js). */
+  color: #584e40;
   pointer-events: none;
 }
 
@@ -536,18 +537,6 @@ h2 {
   background:
     radial-gradient(circle at 76% 12%, rgba(255, 255, 255, 0.5), transparent 30%),
     linear-gradient(145deg, #f8f3ec, #eee9df 58%, #e6e5dc);
-}
-
-.ritual-card.art-ripple .card-art {
-  color: rgba(116, 96, 78, 0.52);
-}
-
-.ritual-card.art-fold .card-art {
-  color: rgba(88, 80, 72, 0.45);
-}
-
-.ritual-card.art-stardust .card-art {
-  color: rgba(98, 86, 70, 0.62);
 }
 
 .ritual-card.finish {
