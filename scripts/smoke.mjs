@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -717,6 +717,80 @@ const httpDeletedProgress = await fetchJson("/api/progress?bookId=http-import");
 const httpDeletedAnnotations = await fetchJson("/api/annotations?bookId=http-import");
 const httpDeletedCards = await fetchJson("/api/cards?bookId=http-import");
 const readerHtml = await fetch(`http://127.0.0.1:${httpPort}/`);
+
+function rawRequest(port, method, rawPath, headers = {}) {
+  // http.request keeps the path as written, unlike fetch(), so traversal attempts reach the server.
+  return new Promise((resolve, reject) => {
+    const req = http.request({ hostname: "127.0.0.1", port, method, path: rawPath, headers }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+const httpImageImport = await fetchJson("/api/import", {
+  method: "POST",
+  body: {
+    filename: "image-demo.epub",
+    dataBase64: (await readFile(imageEpub)).toString("base64"),
+    bookId: "http-image-demo",
+    maxChars: 200,
+    keepImages: true,
+  },
+});
+const httpImageChunk = await fetchJson("/api/books/http-image-demo/chunks/ch00");
+if (!httpImageImport.keepImages || !httpImageChunk.text.includes("[[img:assets/eq-1.png]]")) {
+  throw new Error("HTTP import did not pass keepImages through to the EPUB importer");
+}
+const assetPath = "/api/books/http-image-demo/asset/assets/eq-1.png";
+const assetGet = await rawRequest(httpPort, "GET", assetPath);
+const assetHead = await rawRequest(httpPort, "HEAD", assetPath);
+const assetCached = await rawRequest(httpPort, "GET", assetPath, { "if-none-match": assetGet.headers.etag });
+const assetMissing = await rawRequest(httpPort, "GET", "/api/books/http-image-demo/asset/assets/nope.png");
+const assetUnknownBook = await rawRequest(httpPort, "GET", "/api/books/no-such-book/asset/assets/eq-1.png");
+const assetOutsideAssets = await rawRequest(httpPort, "GET", "/api/books/http-image-demo/asset/manifest.json");
+const assetTraversals = await Promise.all(
+  [
+    "/api/books/http-image-demo/asset/../manifest.json",
+    "/api/books/http-image-demo/asset/assets/../../../progress.json",
+    "/api/books/http-image-demo/asset/assets/%2e%2e/manifest.json",
+    "/api/books/http-image-demo/asset/assets%2F..%2Fmanifest.json",
+    "/api/books/..%2Fhttp-image-demo/asset/assets/eq-1.png",
+  ].map((rawPath) => rawRequest(httpPort, "GET", rawPath)),
+);
+await symlink(
+  path.join(tempDataDir, "progress.json"),
+  path.join(tempDataDir, "books", "http-image-demo", "assets", "escape.png"),
+);
+const assetSymlinkEscape = await rawRequest(httpPort, "GET", "/api/books/http-image-demo/asset/assets/escape.png");
+if (
+  assetGet.status !== 200 ||
+  assetGet.headers["content-type"] !== "image/png" ||
+  assetGet.headers["cache-control"] !== "private, max-age=604800" ||
+  assetGet.headers["x-content-type-options"] !== "nosniff" ||
+  !assetGet.headers.etag ||
+  !assetGet.body.subarray(1, 4).equals(Buffer.from("PNG"))
+) {
+  throw new Error(`Asset route did not serve the image correctly (${assetGet.status})`);
+}
+if (assetHead.status !== 200 || assetHead.body.length !== 0 || assetHead.headers["content-length"] !== String(assetGet.body.length)) {
+  throw new Error("Asset route did not answer HEAD");
+}
+if (assetCached.status !== 304 || assetCached.body.length !== 0) {
+  throw new Error(`Asset route did not answer If-None-Match with 304 (${assetCached.status})`);
+}
+if (assetMissing.status !== 404 || assetUnknownBook.status !== 404 || assetOutsideAssets.status !== 404) {
+  throw new Error("Asset route did not 404 missing files, unknown books, or files outside assets/");
+}
+if (assetTraversals.some((response) => response.status !== 400)) {
+  throw new Error(`Asset route did not refuse traversal: ${assetTraversals.map((response) => response.status).join(",")}`);
+}
+if (assetSymlinkEscape.status !== 403) {
+  throw new Error(`Asset route followed a symlink out of assets/ (${assetSymlinkEscape.status})`);
+}
 httpServer.kill();
 const ssePort = httpPort + 1;
 const sseServer = spawn(process.execPath, [path.join(root, "src/server-sse.js")], {
@@ -806,6 +880,16 @@ const sseApiBooks = await fetchJson("/api/books", {
   baseUrl: `http://127.0.0.1:${ssePort}`,
   headers: { Authorization: "Bearer smoke-token" },
 });
+const sseAssetNoAuth = await rawRequest(ssePort, "GET", assetPath);
+const sseAssetWrongToken = await rawRequest(ssePort, "GET", assetPath, { authorization: "Bearer wrong-token" });
+const sseAssetBearer = await rawRequest(ssePort, "GET", assetPath, { authorization: "Bearer smoke-token" });
+const sseAssetCookie = await rawRequest(ssePort, "GET", assetPath, { cookie: sseCookie.split(";")[0] });
+if (sseAssetNoAuth.status !== 401 || sseAssetWrongToken.status !== 401) {
+  throw new Error("SSE process served a book asset without MCP_AUTH_TOKEN");
+}
+if (sseAssetBearer.status !== 200 || sseAssetCookie.status !== 200) {
+  throw new Error("SSE process did not serve a book asset with bearer or reader cookie auth");
+}
 const sseMcpGet = await fetch(`http://127.0.0.1:${ssePort}/mcp`, {
   headers: { Authorization: "Bearer smoke-token" },
 });

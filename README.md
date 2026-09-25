@@ -220,6 +220,7 @@ The bundled reader is intentionally small: it is a reference UI, not a required 
 - `DELETE /api/books/:bookId`
 - `GET /api/books/:bookId/chunks`
 - `GET /api/books/:bookId/chunks/:chunkId`
+- `GET|HEAD /api/books/:bookId/asset/assets/<file>` (images kept by `--keep-images`)
 - `GET /api/continue?bookId=...`
 - `GET /api/annotations?bookId=...&chunkId=...`
 - `POST /api/annotations`
@@ -228,6 +229,8 @@ The bundled reader is intentionally small: it is a reference UI, not a required 
 - `POST /api/mark-read`
 - `GET /api/search?q=...&bookId=...`
 - `POST /api/import`
+
+A chunk token `[[img:assets/<file>]]` maps to `/api/books/<encodeURIComponent(bookId)>/asset/assets/<file>`. The route uses the same auth as the rest of `/api/*` (bearer header or the reader cookie), only serves files inside the book's `assets/` folder, refuses `..`, encoded slashes, and symlinks that leave the folder, and sends `Cache-Control: private, max-age=604800` with an `ETag` (`If-None-Match` gets a 304).
 
 Human notes are saved as open local notes first. Pressing "Send to Claude" calls `reading_submit_user_notes`, includes chunk context according to the session policy, marks those notes submitted, and avoids resending the same open notes.
 

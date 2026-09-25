@@ -1,4 +1,4 @@
-import { appendFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
@@ -728,6 +728,46 @@ export async function readChunk(bookId, chunkId) {
     nextId: chunk.nextId ?? null,
     text,
   };
+}
+
+function assetError(statusCode, message) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+/**
+ * Resolve an image kept by `import_epub.py --keep-images` ([[img:assets/<file>]]).
+ * Only files inside the book's assets/ folder are served; symlinks that leave it are refused.
+ */
+export async function resolveBookAsset(bookId, segments) {
+  const badSegment = (segment) => !segment || segment === "." || segment === ".." || /[\\/\0]/.test(segment);
+  if (badSegment(bookId) || !segments.length || segments.some(badSegment)) {
+    throw assetError(400, "Bad asset path");
+  }
+  if (segments[0] !== "assets" || segments.length < 2) throw assetError(404, "Not found");
+  try {
+    await loadManifest(bookId);
+  } catch {
+    throw assetError(404, "Not found");
+  }
+
+  const bookDir = resolveInside(booksDir, bookId);
+  let assetsDir;
+  let assetPath;
+  try {
+    const realBookDir = await realpath(bookDir);
+    assetsDir = await realpath(path.join(bookDir, "assets"));
+    if (!assetsDir.startsWith(realBookDir + path.sep)) throw assetError(403, "Forbidden");
+    assetPath = await realpath(path.join(bookDir, ...segments));
+  } catch (error) {
+    if (error.statusCode) throw error;
+    throw assetError(404, "Not found");
+  }
+  if (!assetPath.startsWith(assetsDir + path.sep)) throw assetError(403, "Forbidden");
+  const info = await stat(assetPath);
+  if (!info.isFile()) throw assetError(404, "Not found");
+  return { path: assetPath, size: info.size, mtimeMs: info.mtimeMs, mtime: info.mtime };
 }
 
 async function resolveContinueBook(bookId) {

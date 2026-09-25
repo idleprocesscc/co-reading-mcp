@@ -137,7 +137,8 @@ async function route(req, res) {
     return;
   }
 
-  if (url.pathname.startsWith("/api/")) {
+  // Also check the raw path: URL parsing folds "/api/books/x/asset/../.." out of /api/.
+  if (url.pathname.startsWith("/api/") || String(req.url || "").startsWith("/api/")) {
     return handleApi(req, res, url, { maxBodyBytes });
   }
 
