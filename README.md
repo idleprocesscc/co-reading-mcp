@@ -255,3 +255,5 @@ This repo is designed so private content stays in `data/`, which is ignored by g
 - GPT
 - Claude
 - Koshi
+
+Elsewhere: paintings, songs, and an interview Claude made with nerolette — [claude-n-koshi.cc/nerolette](https://claude-n-koshi.cc/nerolette/) · [paper-boats](https://github.com/idleprocesscc/paper-boats).
