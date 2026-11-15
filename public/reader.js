@@ -898,7 +898,12 @@ $("import-file").addEventListener("change", async (event) => {
       });
       imported.push(manifest);
     }
-    $("status").textContent = files.length === 1 ? `Imported ${files[0].name}.` : `Imported ${files.length} books.`;
+    // An upload that matched a book already there, or got a new id, says so in its message.
+    const notices = imported.filter((result) => result?.status && result.status !== "imported").map((result) => result.message);
+    $("status").textContent =
+      files.length === 1
+        ? imported[0]?.message || `Imported ${files[0].name}.`
+        : [`Imported ${files.length} books.`, ...notices].join(" ");
     await loadBooks();
     renderBooks();
     if (imported.length === 1 && imported[0]?.bookId) {

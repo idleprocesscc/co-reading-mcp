@@ -126,7 +126,7 @@ EPUB:
 python3 scripts/import_epub.py ./book.epub --out ./data/books
 ```
 
-Add `--keep-images` to keep pictures and formula images (useful for textbooks). Images are copied to `data/books/<book-id>/assets/`, the text gets `[[img:assets/<file>]]` placeholders, and `<sup>`/`<sub>` become Unicode (`t²`, `x₀`). Chunk ids and titles stay the same as a text-only import, so re-importing an existing book with images keeps its progress and notes attached to the same chunks (an older note whose quote crossed an image or a superscript keeps its margin card but may lose its in-text highlight). The bundled reader renders the placeholders as images; MCP clients see them as plain text.
+Add `--keep-images` to keep pictures and formula images (useful for textbooks). Images are copied to `data/books/<book-id>/assets/`, the text gets `[[img:assets/<file>]]` placeholders, and `<sup>`/`<sub>` become Unicode (`t²`, `x₀`). Chunk ids and titles stay the same as a text-only import, so re-importing an existing book with images (same `bookId` with `overwrite: true`, or the script with the same `--book-id`) keeps its progress and notes attached to the same chunks (an older note whose quote crossed an image or a superscript keeps its margin card but may lose its in-text highlight). The bundled reader renders the placeholders as images; MCP clients see them as plain text.
 
 Claude can also import books through MCP, which is useful on claude.ai or mobile devices where the user cannot SSH into the server:
 
@@ -156,6 +156,15 @@ TXT imports can pass the same heading options as the command-line script:
 
 The import tools write into `data/books` immediately; no server restart is needed.
 
+An import through the reader or MCP never changes or removes a book that is already in the library unless it passes `overwrite: true`. The result's `status` says what happened:
+
+- `imported`: a new book.
+- `unchanged`: the same content is already there under that id; nothing was written.
+- `imported-new-id`: no `bookId` was given and the id derived from the title (an EPUB's own title, otherwise the file name) belongs to a different book, so this one became `<id>-2`, `<id>-3`, … (`existingBookId` names the book that was in the way). Two different uploads both called `download.epub` both survive.
+- `replaced`: `overwrite: true`. The new version is built first and only then swapped in, and the previous folder moves to `data/trash/books/...` (`archivedAt`). If the import fails, the old book stays as it was. Notes and progress stay with the `bookId`, so they still line up if the chunk ids do.
+
+An explicit `bookId` that already exists is refused unless `overwrite: true` is passed. The command-line scripts below are lower level: they write straight into `--out` and reuse a folder with the same id.
+
 Both importers create:
 
 ```text
@@ -177,9 +186,14 @@ data/
   annotations.jsonl
   progress.json
   reading_sessions.json
+  snapshots/2026-05-22/   copies of the files above (plus cards.jsonl) from before that day's first write
 ```
 
+Before the first write of each day (server local time), the server copies `annotations.jsonl`, `progress.json`, `reading_sessions.json`, and `cards.jsonl` into `data/snapshots/YYYY-MM-DD/`, and keeps the newest 14 of those folders. Set `READING_SNAPSHOT_KEEP` to keep another number, or `0` to turn snapshots off. To roll back, stop the servers and copy the files from a snapshot folder over the ones in `data/`.
+
 `reading_submit_user_notes` includes full chunk text once per `sessionId` by default, then sends only new notes for the same chunk in that session. Use a new `sessionId` when Claude starts a new conversation/session so the relevant chunk context is sent again.
+
+A line in `annotations.jsonl` that can't be parsed (for example a write cut off by a crash or a full disk) is skipped on read, and the next append starts on a new line, so it never takes a neighbouring note with it. The next full rewrite of the file moves the damaged line to `annotations.corrupt.jsonl` instead of dropping it. `cards.jsonl` and `submissions.jsonl` are handled the same way.
 
 ## Tools
 
@@ -196,6 +210,7 @@ data/
 - `reading_delete_book`
 - `reading_annotate_passage`
 - `reading_list_annotations`
+- `reading_export_annotations`
 - `reading_submit_user_notes`
 - `reading_list_submissions`
 - `reading_read_submission`
@@ -225,6 +240,7 @@ The bundled reader is intentionally small: it is a reference UI, not a required 
 - `GET /api/continue?bookId=...`
 - `GET /api/annotations?bookId=...&chunkId=...`
 - `POST /api/annotations`
+- `GET /api/books/:bookId/annotations.md` (all of one book's notes as Markdown, open notes included)
 - `POST /api/replies`
 - `POST /api/submit-notes`
 - `POST /api/mark-read`

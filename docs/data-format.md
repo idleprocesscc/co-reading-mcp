@@ -68,6 +68,8 @@ Annotations are stored as JSONL in `data/annotations.jsonl`.
 }
 ```
 
+Each record is one line. A line that can't be parsed (for example one cut off by a crash or a full disk) is skipped on read without affecting the lines around it, and appends always start on a new line and are flushed to disk. When the file is next rewritten (submitting notes, deleting a book), unparseable lines are moved to `annotations.corrupt.jsonl` as `{ "quarantinedAt", "file", "line" }` records instead of being dropped, and the server logs a warning on stderr; the tool result carries a `warnings` list. `cards.jsonl` and `submissions.jsonl` work the same way, with `cards.corrupt.jsonl` and `submissions.corrupt.jsonl`.
+
 `kind` is intentionally flexible. Suggested values are `annotation`, `question`, `summary`, `feeling`, and `resonance`.
 
 `quoteOffset` is the character offset of the selected quote inside the chunk text. It is optional for older records, but reader UIs should send it when possible so repeated quotes anchor to the exact selected occurrence.
@@ -165,4 +167,14 @@ Deleting a book is a soft delete. The active book folder moves from `data/books/
 
 The same archive directory also receives `deleted-book-data.json`, which contains the removed progress entry, annotations, submissions, cards, and session ledger references for that book. Active JSON/JSONL files are rewritten without those records, so the book disappears from the reader and can be re-imported cleanly.
 
+An import with `overwrite: true` also archives the book folder it replaces here, next to a `replaced-book.json` instead of `deleted-book-data.json`. Its notes, progress, and cards stay active.
+
 Trash archives are retained for 30 days by default and pruned on later delete operations. Set `READING_TRASH_RETENTION_DAYS=0` to disable automatic pruning, or set another positive day count to change the retention window.
+
+## Snapshots
+
+Before the first write of each day (server local time), the server copies `annotations.jsonl`, `progress.json`, `reading_sessions.json`, and `cards.jsonl` into `data/snapshots/YYYY-MM-DD/`. Later writes that day leave the snapshot alone, so it holds the state from before that day's changes. The copy happens under the same `data/.write-lock` as the writes, so several processes on one data dir make one snapshot. `submissions.jsonl` is left out: it repeats submitted notes from `annotations.jsonl` and carries copies of chunk text. Book folders are not copied.
+
+The newest 14 dated folders are kept and older ones are removed. Set `READING_SNAPSHOT_KEEP` to another number, or `0` to turn snapshots off. Other folders under `data/snapshots/` are left alone. If a snapshot fails (for example the disk is full), the server logs it on stderr and goes on with the write.
+
+To restore, stop the servers and copy the files from a snapshot folder back into `data/`.

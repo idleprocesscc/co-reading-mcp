@@ -8,6 +8,7 @@ import {
   continueReading,
   deleteBook,
   dismissCard,
+  exportAnnotationsMarkdown,
   getProgress,
   listCardInbox,
   listCardCollection,
@@ -159,6 +160,13 @@ export async function handleApi(req, res, url, options = {}) {
 
   if (req.method === "DELETE" && parts.length === 3 && parts[1] === "books") {
     return sendJson(res, 200, await deleteBook(parts[2]));
+  }
+
+  if (req.method === "GET" && parts.length === 4 && parts[1] === "books" && parts[3] === "annotations.md") {
+    const markdown = await exportAnnotationsMarkdown(parts[2], { includePrivate: true });
+    res.writeHead(200, { "content-type": "text/markdown; charset=utf-8" });
+    res.end(markdown);
+    return;
   }
 
   if (req.method === "GET" && parts.length === 5 && parts[1] === "books" && parts[3] === "chunks") {
