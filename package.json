@@ -11,6 +11,7 @@
     "scripts/import_text.py",
     "scripts/smoke.mjs",
     "scripts/card-smoke.mjs",
+    "scripts/safety-smoke.mjs",
     "docs",
     "data.example",
     "README.md",
@@ -27,6 +28,7 @@
     "start:sse": "node src/server-sse.js",
     "smoke": "node scripts/smoke.mjs",
     "smoke:cards": "node scripts/card-smoke.mjs",
+    "smoke:safety": "node scripts/safety-smoke.mjs",
     "import:text": "python3 scripts/import_text.py",
     "import:epub": "python3 scripts/import_epub.py",
     "install:card-renderer": "npx playwright install chromium"

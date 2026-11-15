@@ -81,7 +81,16 @@ For TXT/Markdown imports, optional fields mirror `scripts/import_text.py`:
 
 For EPUB imports, `"keepImages": true` keeps pictures and formula images: they are copied to `data/books/<book-id>/assets/` and replaced in the text by `[[img:assets/<file>]]` tokens (a token on its own paragraph is a figure or display formula; a token inside a sentence is inline). `<sup>`/`<sub>` become Unicode where possible (`t²`, `x₀`). Sections, chunk titles, and chunk ids stay identical to an import without `keepImages`, so progress and notes stay attached to the same chunks. The default is `false`.
 
-The server validates the file type, upload size, and `bookId`, writes the book into `data/books`, and returns the imported `bookId`, title, and chunk count.
+For an EPUB, the title and author come from its own metadata (`dc:title`, `dc:creator`) unless you pass `title` / `author`; the file name is only the fallback title. A TXT is titled after its file name unless you pass `title`.
+
+The server validates the file type, upload size, and `bookId`, builds the book in a staging folder, moves it into `data/books`, and returns the `bookId`, title, chunk count, and a `status`:
+
+- `imported`: a new book.
+- `unchanged`: identical content is already in the library under that id, so nothing was written. Re-sending the same file is safe.
+- `imported-new-id`: no `bookId` was given, and the id derived from the title belongs to a different book. The new one is stored as `<id>-2` (or `-3`, …), and `existingBookId` names the book that was left alone.
+- `replaced`: `overwrite: true` replaced the book at that id. The previous folder is archived under `data/trash/books/...` (`archivedAt`). Notes and progress are kept and follow the `bookId`.
+
+Without `overwrite: true`, an import never changes or removes an existing book. An explicit `bookId` that already exists is refused with `Book already exists: <id>. Pass overwrite: true to replace it.` With `overwrite: true`, the old book is only moved to trash after the new import has succeeded, so a failed import leaves it in place. `overwrite` also applies to an id derived from the title.
 
 ## `reading_delete_book`
 
@@ -129,7 +138,7 @@ Call `reading_import_part` once per binary part. Each part should be independent
 { "uploadId": "..." }
 ```
 
-Call `reading_import_finish` to run the importer. Use `reading_import_cancel` to discard an unfinished upload.
+Call `reading_import_finish` to run the importer; it returns the same result as `reading_import_book`, including `status`. Use `reading_import_cancel` to discard an unfinished upload.
 
 ## `reading_annotate_passage`
 
@@ -178,6 +187,16 @@ Input:
 All fields are optional except `bookId` in most practical use.
 
 By default this tool hides human notes with `status: "open"`, `"private"`, or `"draft"` and hides replies under those private notes. This lets a reader save notes and leave without exposing them to Claude. A trusted local UI can pass `includePrivate: true`; Claude-facing MCP clients should not.
+
+## `reading_export_annotations`
+
+Input:
+
+```json
+{ "bookId": "anthropic-guidelines" }
+```
+
+Returns one book's notes as Markdown: chunks in reading order, each note under its quote, replies nested below it. It only reads. Like `reading_list_annotations`, it leaves out human notes that are still open, private, or drafts. The reader's `GET /api/books/:bookId/annotations.md` returns the same Markdown with those notes included.
 
 ## `reading_submit_user_notes`
 

@@ -48,6 +48,8 @@ This starts one process with:
 
 The browser uploads file bytes directly to the Co-Reading server with `POST /api/import`. No SSH or manual script run is needed.
 
+An EPUB shows up under the title and author from its own metadata, so a file called `download.epub` still gets its real title. The browser never replaces a book that is already in the library. Uploading the same file again changes nothing. A different book that would get the same id (for example two TXT files both called `download.txt`) is added next to the first as `download-2`. The status line says which one happened.
+
 ## Connect Claude Desktop or Claude Code
 
 Use `src/http.js` when you want the same process to serve both the reader and MCP:
@@ -112,7 +114,7 @@ The address bar keeps the open book and chapter (`#/book/<bookId>/<chunkId>`), s
 
 ## Books With Images
 
-Leave `Keep EPUB images on import` checked in the Library panel (or pass `--keep-images` to `scripts/import_epub.py`) to keep an EPUB's pictures and formula images. Figures and display formulas show on their own line; inline formulas sit inside the sentence at text height. Dark mode inverts them so black-on-white art stays readable.
+Leave `Keep EPUB images on import` checked in the Library panel (or pass `--keep-images` to `scripts/import_epub.py`) to keep an EPUB's pictures and formula images. Uploading an EPUB again with images adds a second copy, because the browser never replaces a book. To give an existing book its images and keep its notes, re-import it with the same `bookId` and `overwrite: true` (through Claude's `reading_import_book`), or run the script with the same `--book-id`. Figures and display formulas show on their own line; inline formulas sit inside the sentence at text height. Dark mode inverts them so black-on-white art stays readable.
 
 Highlighting across an image works: the saved quote keeps the image placeholder, so the note anchors to the same spot and Claude sees where the formula was.
 

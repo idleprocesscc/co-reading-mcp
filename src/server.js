@@ -9,6 +9,7 @@ import {
   dataDir,
   deleteBook,
   dismissCard,
+  exportAnnotationsMarkdown,
   getProgress,
   listCardInbox,
   listCardCollection,
@@ -240,6 +241,18 @@ export const tools = [
       additionalProperties: false,
     },
     annotations: { title: "List Annotations", readOnlyHint: true },
+  },
+  {
+    name: "reading_export_annotations",
+    description:
+      "Export one book's margin notes and replies as Markdown, grouped by chunk in reading order. Open human notes stay hidden until submitted, as in reading_list_annotations.",
+    inputSchema: {
+      type: "object",
+      required: ["bookId"],
+      properties: { bookId: { type: "string" } },
+      additionalProperties: false,
+    },
+    annotations: { title: "Export Annotations", readOnlyHint: true },
   },
   {
     name: "reading_submit_user_notes",
@@ -489,6 +502,8 @@ export async function callTool(name, args = {}) {
       return textContent(await annotatePassage({ ...args, author: "claude", status: "published" }));
     case "reading_list_annotations":
       return textContent(await listAnnotations(args));
+    case "reading_export_annotations":
+      return textContent(await exportAnnotationsMarkdown(args.bookId));
     case "reading_submit_user_notes":
       return textContent(await submitUserNotes(args));
     case "reading_list_submissions":

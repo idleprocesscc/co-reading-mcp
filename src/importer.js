@@ -1,4 +1,4 @@
-import { access, appendFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
@@ -7,24 +7,26 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { resolveInside } from "./paths.js";
-import { dataDir } from "./store.js";
+import { archiveReplacedBook, dataDir, restoreReplacedBook, withWriteLock } from "./store.js";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const booksDir = path.join(dataDir, "books");
 const uploadsDir = path.join(dataDir, "uploads");
+// Importers write here first; a finished book is renamed into books/ (same volume, so it's atomic).
+const stagingDir = path.join(dataDir, ".import-staging");
 const maxImportBytes = Number(process.env.READING_IMPORT_MAX_BYTES || 25_000_000);
 const maxImportOutputBytes = Number(process.env.READING_IMPORT_MAX_OUTPUT_BYTES || 10_000_000);
 const uploadSessions = new Map();
 let importQueue = Promise.resolve();
 const STALE_UPLOAD_MS = 60 * 60 * 1000; // 1 hour
 
-async function cleanupStaleUploads() {
+async function cleanupStaleDirs(parentDir) {
   try {
-    const entries = await readdir(uploadsDir).catch(() => []);
+    const entries = await readdir(parentDir).catch(() => []);
     const now = Date.now();
     for (const entry of entries) {
-      const dir = path.join(uploadsDir, entry);
+      const dir = path.join(parentDir, entry);
       try {
         const info = await stat(dir);
         if (info.isDirectory() && now - info.mtimeMs > STALE_UPLOAD_MS) {
@@ -32,10 +34,11 @@ async function cleanupStaleUploads() {
         }
       } catch { /* ignore per-entry errors */ }
     }
-  } catch { /* uploads dir may not exist yet */ }
+  } catch { /* dir may not exist yet */ }
 }
 
-cleanupStaleUploads();
+cleanupStaleDirs(uploadsDir);
+cleanupStaleDirs(stagingDir);
 
 function withImportLock(operation) {
   const run = importQueue.then(operation, operation);
@@ -132,23 +135,18 @@ function commonOptions(input = {}) {
   };
 }
 
-async function prepareTarget(options) {
-  await mkdir(booksDir, { recursive: true });
-  if (!options.bookId) return;
-
-  const target = resolveInside(booksDir, options.bookId);
-  if (!(await exists(target))) return;
-  if (!options.overwrite) {
-    throw new Error(`Book already exists: ${options.bookId}. Pass overwrite: true to replace it.`);
-  }
-  await rm(target, { recursive: true, force: true });
+function alreadyExistsError(bookId) {
+  return new Error(`Book already exists: ${bookId}. Pass overwrite: true to replace it.`);
 }
 
-function importerArgs(filePath, options) {
+function importerArgs(filePath, outDir, options) {
   const script = options.format === "epub" ? "scripts/import_epub.py" : "scripts/import_text.py";
-  const args = [path.join(ROOT, script), filePath, "--out", booksDir];
+  const args = [path.join(ROOT, script), filePath, "--out", outDir];
 
-  args.push("--title", options.title || titleFromFilename(options.filename));
+  // An EPUB names itself (dc:title, dc:creator) and import_epub.py falls back to the file name;
+  // passing the file name as --title would hide the real title (and turn it into the author).
+  const title = options.title || (options.format === "txt" ? titleFromFilename(options.filename) : null);
+  if (title) args.push("--title", title);
 
   if (options.author) args.push("--author", options.author);
   if (options.bookId) args.push("--book-id", options.bookId);
@@ -162,7 +160,7 @@ function importerArgs(filePath, options) {
   return args;
 }
 
-async function readImportedManifest(stdout) {
+function importedBookDir(stdout, outDir) {
   const importedPath = stdout
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -171,47 +169,174 @@ async function readImportedManifest(stdout) {
   if (!importedPath) throw new Error("Import script did not report an output directory");
 
   const bookDir = path.resolve(ROOT, importedPath);
-  const relative = path.relative(path.resolve(booksDir), bookDir);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("Import script returned a directory outside data/books");
+  const relative = path.relative(path.resolve(outDir), bookDir);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative) || relative.includes(path.sep)) {
+    throw new Error("Import script returned a directory outside its output folder");
   }
+  return bookDir;
+}
 
+async function readManifestAt(bookDir) {
   return JSON.parse(await readFile(path.join(bookDir, "manifest.json"), "utf8"));
 }
 
-async function runImport(filePath, options) {
-  await prepareTarget(options);
-  const args = importerArgs(filePath, options);
-  let stdout = "";
-  let stderr = "";
+async function listFilesRecursive(dir, prefix = "") {
+  const files = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const relative = path.join(prefix, entry.name);
+    if (entry.isDirectory()) files.push(...(await listFilesRecursive(path.join(dir, entry.name), relative)));
+    else files.push(entry.isFile() ? relative : `${relative}\0special`); // symlinks etc. never match
+  }
+  return files.sort();
+}
+
+/** The manifest minus what differs between two imports of the same file. */
+function comparableManifest(buffer) {
   try {
-    const result = await execFileAsync(process.platform === "win32" ? "python" : "python3", args, {
-      cwd: ROOT,
-      maxBuffer: maxImportOutputBytes,
-      timeout: 60_000,
-    });
-    stdout = result.stdout || "";
-    stderr = result.stderr || "";
-  } catch (error) {
-    const message = [error.message, error.stderr].filter(Boolean).join("\n").trim();
-    throw new Error(message || "Import script failed");
+    const { bookId, createdAt, ...rest } = JSON.parse(buffer.toString("utf8"));
+    if (rest.source && typeof rest.source === "object") rest.source = { ...rest.source, fileName: undefined };
+    return JSON.stringify(rest);
+  } catch {
+    return null;
+  }
+}
+
+/** True when two book folders hold the same text, chunking, metadata, and assets. */
+async function sameBookContent(dirA, dirB) {
+  let filesA;
+  let filesB;
+  try {
+    [filesA, filesB] = await Promise.all([listFilesRecursive(dirA), listFilesRecursive(dirB)]);
+  } catch {
+    return false;
+  }
+  if (filesA.join("\n") !== filesB.join("\n")) return false;
+  for (const relative of filesA) {
+    const [a, b] = await Promise.all([readFile(path.join(dirA, relative)), readFile(path.join(dirB, relative))]);
+    if (relative === "manifest.json") {
+      const comparable = comparableManifest(a);
+      if (comparable === null || comparable !== comparableManifest(b)) return false;
+    } else if (!a.equals(b)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const MAX_ID_SUFFIX = 1000;
+
+/**
+ * Move a finished import from staging into books/. Without overwrite this never changes or
+ * removes an existing book: identical content is a no-op, and a different book whose id was
+ * derived from its title (no bookId given) gets the first free "<id>-N". Runs inside the data
+ * lock, so two processes can't claim the same id.
+ */
+async function placeImportedBook(stagedDir, options) {
+  await mkdir(booksDir, { recursive: true });
+  const manifest = await readManifestAt(stagedDir);
+  // The importer names the folder after the bookId it chose (the given one, or a slug of the title).
+  const wantedId = path.basename(stagedDir);
+  const target = resolveInside(booksDir, wantedId);
+
+  if (!(await exists(target))) {
+    await rename(stagedDir, target);
+    return { status: "imported", bookId: wantedId, manifest };
+  }
+  if (await sameBookContent(stagedDir, target)) {
+    return { status: "unchanged", bookId: wantedId, manifest: await readManifestAt(target) };
+  }
+  if (options.overwrite) {
+    const archived = await archiveReplacedBook(wantedId, { title: manifest.title, source: manifest.source || null });
+    try {
+      await rename(stagedDir, target);
+    } catch (error) {
+      await restoreReplacedBook(wantedId, archived);
+      throw error;
+    }
+    return { status: "replaced", bookId: wantedId, manifest, archivedAt: archived.archiveDir };
+  }
+  if (options.bookId) throw alreadyExistsError(wantedId);
+
+  for (let suffix = 2; suffix <= MAX_ID_SUFFIX; suffix += 1) {
+    const candidateId = `${wantedId}-${suffix}`;
+    const candidate = resolveInside(booksDir, candidateId);
+    if (await exists(candidate)) {
+      if (await sameBookContent(stagedDir, candidate)) {
+        return { status: "unchanged", bookId: candidateId, manifest: await readManifestAt(candidate) };
+      }
+      continue;
+    }
+    manifest.bookId = candidateId;
+    await writeFile(path.join(stagedDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await rename(stagedDir, candidate);
+    return { status: "imported-new-id", bookId: candidateId, manifest, existingBookId: wantedId };
+  }
+  throw new Error(`Too many books already use the id ${wantedId}; pass a bookId.`);
+}
+
+function importMessage(placed) {
+  const { manifest } = placed;
+  const chunks = `${manifest.chunks?.length || 0} chunks`;
+  switch (placed.status) {
+    case "unchanged":
+      return `${manifest.title} is already in the library as ${placed.bookId} with identical content; nothing changed.`;
+    case "imported-new-id":
+      return `Imported ${manifest.title} (${chunks}) as ${placed.bookId}: a different book already uses the id ${placed.existingBookId}, so that one was left as it was.`;
+    case "replaced":
+      return `Replaced ${placed.bookId} with ${manifest.title} (${chunks}). The previous version is archived under data/trash; notes and progress stay attached to the same chunk ids.`;
+    default:
+      return `Imported ${manifest.title} (${chunks}).`;
+  }
+}
+
+async function runImport(filePath, options) {
+  // Refuse early so a clash costs nothing; placeImportedBook checks again under the data lock.
+  if (options.bookId && !options.overwrite && (await exists(resolveInside(booksDir, options.bookId)))) {
+    throw alreadyExistsError(options.bookId);
   }
 
-  if (stderr.trim()) process.stderr.write(stderr);
-  const manifest = await readImportedManifest(stdout);
-  const firstChunk = manifest.chunks?.[0] || null;
-  const lastChunk = manifest.chunks?.[manifest.chunks.length - 1] || null;
-  return {
-    bookId: manifest.bookId,
-    title: manifest.title,
-    author: manifest.author || null,
-    chunkCount: manifest.chunks?.length || 0,
-    firstChunkId: firstChunk?.id || null,
-    lastChunkId: lastChunk?.id || null,
-    source: manifest.source || null,
-    keepImages: options.format === "epub" && options.keepImages,
-    message: `Imported ${manifest.title} (${manifest.chunks?.length || 0} chunks).`,
-  };
+  await mkdir(stagingDir, { recursive: true });
+  const outDir = await mkdtemp(path.join(stagingDir, "import-"));
+  try {
+    const args = importerArgs(filePath, outDir, options);
+    let stdout = "";
+    let stderr = "";
+    try {
+      const result = await execFileAsync(process.platform === "win32" ? "python" : "python3", args, {
+        cwd: ROOT,
+        maxBuffer: maxImportOutputBytes,
+        timeout: 60_000,
+      });
+      stdout = result.stdout || "";
+      stderr = result.stderr || "";
+    } catch (error) {
+      const message = [error.message, error.stderr].filter(Boolean).join("\n").trim();
+      throw new Error(message || "Import script failed");
+    }
+
+    if (stderr.trim()) process.stderr.write(stderr);
+    const stagedDir = importedBookDir(stdout, outDir);
+    const placed = await withWriteLock(() => placeImportedBook(stagedDir, options));
+    const { manifest } = placed;
+    const firstChunk = manifest.chunks?.[0] || null;
+    const lastChunk = manifest.chunks?.[manifest.chunks.length - 1] || null;
+    return {
+      bookId: placed.bookId,
+      title: manifest.title,
+      author: manifest.author || null,
+      chunkCount: manifest.chunks?.length || 0,
+      firstChunkId: firstChunk?.id || null,
+      lastChunkId: lastChunk?.id || null,
+      source: manifest.source || null,
+      keepImages: options.format === "epub" && options.keepImages,
+      status: placed.status,
+      ...(placed.existingBookId ? { existingBookId: placed.existingBookId } : {}),
+      ...(placed.archivedAt ? { archivedAt: placed.archivedAt } : {}),
+      message: importMessage(placed),
+    };
+  } finally {
+    await rm(outDir, { recursive: true, force: true });
+  }
 }
 
 export function importLimits() {

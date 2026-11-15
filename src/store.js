@@ -1,4 +1,4 @@
-import { appendFile, cp, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
@@ -65,10 +65,11 @@ async function acquireDataLock() {
   }
 }
 
-async function withWriteLock(operation) {
+export async function withWriteLock(operation) {
   const locked = async () => {
     await acquireDataLock();
     try {
+      await snapshotBeforeFirstWriteOfDay();
       return await operation();
     } finally {
       await rm(lockDir, { recursive: true, force: true });
@@ -115,13 +116,172 @@ async function writeJson(filePath, value) {
   await writeFileAtomic(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+// JSONL files hold one JSON object per line. A write cut off by a crash or a full disk can leave
+// a partial last line. appendJsonl then starts on a fresh line so the next record survives,
+// readJsonl skips lines it can't parse (but keeps a record that an older version appended onto
+// one), and writeJsonl moves those lines to <name>.corrupt.jsonl before replacing the file.
+
+function parseJsonlRecord(line) {
+  try {
+    const value = JSON.parse(line);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A full record glued onto a partial one ("<partial>{...}"), as an unguarded append leaves it. */
+function trailingRecord(line) {
+  for (let index = line.indexOf('{"', 1); index > 0; index = line.indexOf('{"', index + 1)) {
+    const record = parseJsonlRecord(line.slice(index));
+    if (record) return record;
+  }
+  return null;
+}
+
+function parseJsonl(raw) {
+  const rows = [];
+  const badLines = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    const record = parseJsonlRecord(line);
+    if (record) {
+      rows.push(record);
+      continue;
+    }
+    badLines.push(line);
+    const glued = trailingRecord(line);
+    if (glued) rows.push(glued);
+  }
+  return { rows, badLines };
+}
+
+function corruptPathFor(filePath) {
+  return `${filePath.replace(/\.jsonl$/, "")}.corrupt.jsonl`;
+}
+
+const jsonlWarnings = new Map();
+
+function warnDamagedJsonl(filePath, count) {
+  if (jsonlWarnings.get(filePath) === count) return;
+  jsonlWarnings.set(filePath, count);
+  process.stderr.write(
+    `co-reading: ${path.basename(filePath)} has ${count} unreadable line(s); skipping them. ` +
+      `The next rewrite moves them to ${path.basename(corruptPathFor(filePath))}.\n`,
+  );
+}
+
+/**
+ * Append records, first ending a cut-off last line, and flush to disk. Returns true when the
+ * file did not end with a newline. Call inside withWriteLock.
+ */
+async function appendJsonl(filePath, ...rows) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const handle = await open(filePath, "a+");
+  try {
+    const { size } = await handle.stat();
+    let repaired = false;
+    if (size > 0) {
+      const last = Buffer.alloc(1);
+      await handle.read(last, 0, 1, size - 1);
+      repaired = last[0] !== 0x0a;
+    }
+    await handle.appendFile(`${repaired ? "\n" : ""}${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+    await handle.sync();
+    if (repaired) {
+      process.stderr.write(`co-reading: ${path.basename(filePath)} ended mid-line (an earlier write was cut off); appended on a new line.\n`);
+    }
+    return repaired;
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Move the lines of a JSONL file that don't parse into its .corrupt.jsonl sidecar. Returns how many. */
+async function quarantineDamagedLines(filePath) {
+  let raw;
+  try {
+    raw = await readFile(filePath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return 0;
+    throw error;
+  }
+  const { badLines } = parseJsonl(raw);
+  if (!badLines.length) return 0;
+  const quarantinedAt = new Date().toISOString();
+  const sidecar = corruptPathFor(filePath);
+  await appendJsonl(sidecar, ...badLines.map((line) => ({ quarantinedAt, file: path.basename(filePath), line })));
+  jsonlWarnings.delete(filePath);
+  process.stderr.write(`co-reading: moved ${badLines.length} unreadable line(s) from ${path.basename(filePath)} to ${path.basename(sidecar)}.\n`);
+  return badLines.length;
+}
+
+function damagedLinesWarning(filePath, count) {
+  return `${path.basename(filePath)} had ${count} unreadable line(s) (e.g. a write cut off by a crash); they were moved to ${path.basename(corruptPathFor(filePath))} instead of being dropped.`;
+}
+
+/** Replace a JSONL file with rows, keeping any line it couldn't parse in the sidecar. Returns that count. */
 async function writeJsonl(filePath, rows) {
+  const quarantined = await quarantineDamagedLines(filePath);
   const body = rows.map((row) => JSON.stringify(row)).join("\n");
   await writeFileAtomic(filePath, body ? `${body}\n` : "");
+  return quarantined;
 }
 
 function safeTrashName(value) {
   return String(value || "book").replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(0, 120) || "book";
+}
+
+function newTrashArchiveDir(bookId, isoTime) {
+  return resolveInside(
+    trashDir,
+    "books",
+    `${safeTrashName(bookId)}-${isoTime.replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}`,
+  );
+}
+
+/** rename(), falling back to copy + remove when the destination is on another device. */
+async function moveDir(from, to) {
+  try {
+    await rename(from, to);
+  } catch (error) {
+    if (error.code !== "EXDEV") throw error;
+    await cp(from, to, { recursive: true });
+    await rm(from, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Overwrite import: move a book's current folder to trash so the old version stays recoverable.
+ * Its notes and progress stay active (they follow the bookId). Call inside withWriteLock.
+ */
+export async function archiveReplacedBook(bookId, replacement = {}) {
+  const bookDir = resolveInside(booksDir, bookId);
+  const manifest = await readJson(path.join(bookDir, "manifest.json"), null).catch(() => null);
+  const now = new Date().toISOString();
+  const archiveDir = newTrashArchiveDir(bookId, now);
+  const archivedBookDir = path.join(archiveDir, "book");
+  await mkdir(archiveDir, { recursive: true });
+  await moveDir(bookDir, archivedBookDir);
+  await writeJson(path.join(archiveDir, "replaced-book.json"), {
+    replacedAt: now,
+    bookId,
+    title: manifest?.title ?? null,
+    author: manifest?.author ?? null,
+    archivedBookDir,
+    replacement,
+  });
+  manifestCache.clear();
+  chunkTextCache.clear();
+  return { archiveDir, archivedBookDir };
+}
+
+/** Undo archiveReplacedBook when the new folder could not be put in place. */
+export async function restoreReplacedBook(bookId, archived) {
+  await moveDir(archived.archivedBookDir, resolveInside(booksDir, bookId));
+  await rm(archived.archiveDir, { recursive: true, force: true });
+  manifestCache.clear();
+  chunkTextCache.clear();
 }
 
 function trashRetentionDays() {
@@ -153,6 +313,80 @@ async function pruneOldTrash(nowMs = Date.now()) {
     pruned += 1;
   }
   return { retentionDays, pruned };
+}
+
+// Before the first write of each (local) day, the state files are copied to
+// data/snapshots/YYYY-MM-DD/ and only the newest READING_SNAPSHOT_KEEP (default 14) dated folders
+// are kept; 0 turns snapshots off. It runs under the data lock, so concurrent processes make one
+// snapshot. submissions.jsonl is left out: it repeats notes from annotations.jsonl plus chunk text.
+const snapshotsDir = path.join(dataDir, "snapshots");
+const snapshotFiles = [annotationsPath, progressPath, sessionsPath, cardsPath];
+const defaultSnapshotKeep = 14;
+let snapshotCheckedDay = null;
+
+function snapshotKeep() {
+  const configured = Number(process.env.READING_SNAPSHOT_KEEP ?? defaultSnapshotKeep);
+  if (!Number.isFinite(configured)) return defaultSnapshotKeep;
+  return configured > 0 ? Math.floor(configured) : 0;
+}
+
+function localDay(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+async function pathExists(filePath) {
+  try {
+    await stat(filePath);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function pruneSnapshots(keep) {
+  const entries = await readdir(snapshotsDir, { withFileTypes: true });
+  const days = entries
+    .filter((entry) => entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+  for (const day of days.slice(0, Math.max(days.length - keep, 0))) {
+    await rm(path.join(snapshotsDir, day), { recursive: true, force: true });
+  }
+  // Half-written snapshots from a crash; nobody else is snapshotting while we hold the lock.
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name.startsWith(".tmp-")) {
+      await rm(path.join(snapshotsDir, entry.name), { recursive: true, force: true });
+    }
+  }
+}
+
+/** Call with the data lock held. A failure is logged and never blocks the write. */
+async function snapshotBeforeFirstWriteOfDay() {
+  const keep = snapshotKeep();
+  const day = localDay();
+  if (!keep || snapshotCheckedDay === day) return;
+  snapshotCheckedDay = day;
+  const target = path.join(snapshotsDir, day);
+  const temp = path.join(snapshotsDir, `.tmp-${day}-${process.pid}-${crypto.randomBytes(3).toString("hex")}`);
+  try {
+    if (!(await pathExists(target))) {
+      await mkdir(temp, { recursive: true });
+      for (const filePath of snapshotFiles) {
+        try {
+          await cp(filePath, path.join(temp, path.basename(filePath)));
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+      }
+      await rename(temp, target);
+    }
+    await pruneSnapshots(keep);
+  } catch (error) {
+    await rm(temp, { recursive: true, force: true }).catch(() => {});
+    process.stderr.write(`co-reading: could not snapshot state files into ${target}: ${error.message}\n`);
+  }
 }
 
 /** Split items into [matching, rest]. */
@@ -325,8 +559,7 @@ async function maybeCollectSectionCard({ manifest, targetChunk, progressEntry, f
       trigger: finish ? "book-complete" : "section-complete",
     },
   };
-  await mkdir(dataDir, { recursive: true });
-  await appendFile(cardsPath, `${JSON.stringify(card)}\n`, "utf8");
+  await appendJsonl(cardsPath, card);
   return cardSummary(card);
 }
 
@@ -497,8 +730,7 @@ async function maybeCollectBookFinishCard({ manifest, progressEntry, finish = nu
       shared: moment.shared,
     },
   };
-  await mkdir(dataDir, { recursive: true });
-  await appendFile(cardsPath, `${JSON.stringify(card)}\n`, "utf8");
+  await appendJsonl(cardsPath, card);
   return cardSummary(card);
 }
 
@@ -627,11 +859,7 @@ export async function deleteBook(bookId) {
     const bookIds = new Set([bookId, manifest.bookId].filter(Boolean));
     const requestedBookDir = resolveInside(booksDir, bookId);
     const now = new Date().toISOString();
-    const archiveDir = resolveInside(
-      trashDir,
-      "books",
-      `${safeTrashName(manifest.bookId || bookId)}-${now.replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}`,
-    );
+    const archiveDir = newTrashArchiveDir(manifest.bookId || bookId, now);
     const archivedBookDir = path.join(archiveDir, "book");
 
     const progress = await loadProgress();
@@ -668,16 +896,7 @@ export async function deleteBook(bookId) {
     }
 
     await mkdir(archiveDir, { recursive: true });
-    try {
-      await rename(requestedBookDir, archivedBookDir);
-    } catch (renameErr) {
-      if (renameErr.code === "EXDEV") {
-        await cp(requestedBookDir, archivedBookDir, { recursive: true });
-        await rm(requestedBookDir, { recursive: true, force: true });
-      } else {
-        throw renameErr;
-      }
-    }
+    await moveDir(requestedBookDir, archivedBookDir);
     await writeJson(path.join(archiveDir, "deleted-book-data.json"), {
       deletedAt: now,
       requestedBookId: bookId,
@@ -695,9 +914,15 @@ export async function deleteBook(bookId) {
     });
 
     await writeJson(progressPath, keptProgress);
-    await writeJsonl(annotationsPath, keptAnnotations);
-    await writeJsonl(submissionsPath, keptSubmissions);
-    await writeJsonl(cardsPath, keptCards);
+    const warnings = [];
+    for (const [filePath, rows] of [
+      [annotationsPath, keptAnnotations],
+      [submissionsPath, keptSubmissions],
+      [cardsPath, keptCards],
+    ]) {
+      const quarantined = await writeJsonl(filePath, rows);
+      if (quarantined) warnings.push(damagedLinesWarning(filePath, quarantined));
+    }
     await writeJson(sessionsPath, keptSessions);
     const trash = await pruneOldTrash(Date.parse(now));
 
@@ -717,6 +942,7 @@ export async function deleteBook(bookId) {
         progressEntries: Object.keys(removedProgress).length,
       },
       trash,
+      ...(warnings.length ? { warnings } : {}),
       message: `Deleted "${manifest.title || manifest.bookId || bookId}" from the active library and archived its data under data/trash.`,
     };
   });
@@ -1104,17 +1330,9 @@ async function readJsonl(filePath) {
     throw error;
   }
 
-  return raw
-    .split(/\n+/)
-    .filter(Boolean)
-    .map((line) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
+  const { rows, badLines } = parseJsonl(raw);
+  if (badLines.length) warnDamagedJsonl(filePath, badLines.length);
+  return rows;
 }
 
 async function readAllSubmissions() {
@@ -1228,11 +1446,12 @@ export async function dismissCard(cardId) {
       return found;
     });
     if (!found) throw new Error(`Unknown cardId: ${cardId}`);
-    await writeJsonl(cardsPath, updated);
+    const quarantined = await writeJsonl(cardsPath, updated);
     return {
       id: found.id,
       status: found.status,
       dismissedAt,
+      ...(quarantined ? { warnings: [damagedLinesWarning(cardsPath, quarantined)] } : {}),
       message: `Dismissed reading card ${found.id}.`,
     };
   });
@@ -1271,8 +1490,7 @@ export async function collectCard(input = {}) {
       context: input.context || null,
     };
 
-    await mkdir(dataDir, { recursive: true });
-    await appendFile(cardsPath, `${JSON.stringify(card)}\n`, "utf8");
+    await appendJsonl(cardsPath, card);
     return {
       ...cardSummary(card),
       message: `Collected reading card ${card.id}: ${card.kicker}`,
@@ -1289,6 +1507,73 @@ export async function listAnnotations({ bookId, chunkId, kind, author, status, p
     .filter((item) => !author || authorMatches(item.author, author))
     .filter((item) => !status || (item.status || "published") === status)
     .filter((item) => parentId === undefined || (item.parentId || null) === parentId);
+}
+
+function markdownNoteHeader(annotation) {
+  const details = [String(annotation.createdAt || "").slice(0, 10)];
+  if (annotation.kind && !["annotation", "reply"].includes(annotation.kind)) details.push(annotation.kind);
+  if (annotation.mood) details.push(annotation.mood);
+  if ((annotation.status || "published") !== "published") details.push(annotation.status);
+  return [`**${annotation.author || "unknown"}**`, ...details.filter(Boolean)].join(" · ");
+}
+
+/** One book's notes as Markdown: chunks in reading order, notes by position, replies nested. Read-only. */
+export async function exportAnnotationsMarkdown(bookId, { includePrivate = false } = {}) {
+  if (!bookId) throw new Error("bookId is required");
+  const manifest = await loadManifest(bookId);
+  const notes = visibleAnnotations((await annotationSummary()).rows, { includePrivate }).filter(
+    (annotation) => annotation.bookId === bookId,
+  );
+  const ids = new Set(notes.map((annotation) => annotation.id));
+  const byCreated = (a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+  const byPosition = (a, b) => (a.quoteOffset ?? Infinity) - (b.quoteOffset ?? Infinity) || byCreated(a, b);
+  const roots = [];
+  const replies = new Map();
+  for (const annotation of notes) {
+    if (annotation.parentId && ids.has(annotation.parentId)) {
+      if (!replies.has(annotation.parentId)) replies.set(annotation.parentId, []);
+      replies.get(annotation.parentId).push(annotation);
+    } else {
+      roots.push(annotation);
+    }
+  }
+
+  const lines = [`# ${manifest.title || bookId}`, ""];
+  if (manifest.author) lines.push(`by ${manifest.author}`, "");
+  lines.push(`Margin notes exported ${new Date().toISOString().slice(0, 10)}: ${roots.length} notes, ${notes.length - roots.length} replies.`, "");
+  const renderReplies = (parentId, depth) => {
+    for (const reply of (replies.get(parentId) || []).sort(byCreated)) {
+      const indent = "  ".repeat(depth);
+      const [first, ...rest] = String(reply.note || "").split("\n");
+      lines.push(`${indent}- ${markdownNoteHeader(reply)}: ${first}`, ...rest.map((line) => `${indent}  ${line}`));
+      renderReplies(reply.id, depth + 1);
+    }
+  };
+  const renderNote = (annotation) => {
+    lines.push(...String(annotation.quote || "").split("\n").map((line) => `> ${line}`), "");
+    lines.push(markdownNoteHeader(annotation), "", String(annotation.note || ""), "");
+    if (replies.has(annotation.id)) {
+      renderReplies(annotation.id, 0);
+      lines.push("");
+    }
+  };
+
+  const chunkIds = new Set(manifest.chunks.map((chunk) => chunk.id));
+  for (const chunk of sortedChunks(manifest)) {
+    const here = roots.filter((annotation) => annotation.chunkId === chunk.id).sort(byPosition);
+    if (!here.length) continue;
+    lines.push(`## ${chunk.title || chunk.id}`, "");
+    here.forEach(renderNote);
+  }
+  const elsewhere = roots.filter((annotation) => !chunkIds.has(annotation.chunkId)).sort(byCreated);
+  if (elsewhere.length) {
+    lines.push("## Notes on chunks this book no longer has", "");
+    for (const annotation of elsewhere) {
+      lines.push(`*${annotation.chunkId}*`, "");
+      renderNote(annotation);
+    }
+  }
+  return `${lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
 }
 
 export async function annotatePassage(input) {
@@ -1338,8 +1623,7 @@ export async function annotatePassage(input) {
       createdAt: new Date().toISOString(),
     };
 
-    await mkdir(dataDir, { recursive: true });
-    await appendFile(annotationsPath, `${JSON.stringify(annotation)}\n`, "utf8");
+    const repaired = await appendJsonl(annotationsPath, annotation);
     invalidateAnnotationCache();
     // Counts and the message are feedback for the caller only; they go stale, so they aren't stored.
     return {
@@ -1347,6 +1631,13 @@ export async function annotatePassage(input) {
       annotationIndexInBook,
       annotationIndexInChunk,
       replyIndex,
+      ...(repaired
+        ? {
+            warnings: [
+              `annotations.jsonl ended in the middle of a line (an earlier write was cut off). This note was saved on a new line; the damaged line is skipped and moves to annotations.corrupt.jsonl on the next rewrite.`,
+            ],
+          }
+        : {}),
       message: parentId
         ? `Saved reply ${replyIndex} under annotation ${parentId}.`
         : `Saved annotation ${annotationIndexInBook} in this book (${annotationIndexInChunk} in this chunk).`,
@@ -1392,6 +1683,7 @@ export async function submitUserNotes({
     delete context.ledger;
 
     let submission = null;
+    const warnings = [];
     if (submitted.length > 0) {
       submission = {
         id: `sub_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
@@ -1416,11 +1708,11 @@ export async function submitUserNotes({
         },
       };
       const previousSubmissions = await readAllSubmissions();
-      await writeJsonl(annotationsPath, updated);
+      const quarantined = await writeJsonl(annotationsPath, updated);
+      if (quarantined) warnings.push(damagedLinesWarning(annotationsPath, quarantined));
       invalidateAnnotationCache();
       try {
-        await mkdir(dataDir, { recursive: true });
-        await appendFile(submissionsPath, `${JSON.stringify({ ...submission, notes: submitted, context })}\n`, "utf8");
+        await appendJsonl(submissionsPath, { ...submission, notes: submitted, context });
         await saveSessionLedger(ledger);
       } catch (error) {
         await writeJsonl(annotationsPath, annotations);
@@ -1437,6 +1729,7 @@ export async function submitUserNotes({
       count: submitted.length,
       notes: submitted,
       context,
+      ...(warnings.length ? { warnings } : {}),
       message:
         submitted.length === 0
           ? "No open user notes to submit."
